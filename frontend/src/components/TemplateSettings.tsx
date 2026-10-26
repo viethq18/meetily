@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
-import { Input } from "./ui/input";
+import { Plus, Copy, Pencil, Trash2, Download, Upload } from "lucide-react";
 
 interface TemplateInfo {
     id: string;
@@ -42,9 +42,9 @@ Optional table hint (lines starting with | are kept as the item format):
 /**
  * Summary template management: list, create, edit, copy, delete, import, export.
  *
- * Templates are stored as Markdown in the editor and persisted as JSON by the
- * Rust core (`api_save_template_from_markdown`). Built-in templates are
- * read-only; copying one creates an editable custom template.
+ * Templates are edited as Markdown and persisted as JSON by the Rust core
+ * (`api_save_template_from_markdown`). Built-in templates are read-only;
+ * copying one creates an editable custom template.
  */
 export function TemplateSettings() {
     const [templates, setTemplates] = useState<TemplateInfo[]>([]);
@@ -151,8 +151,6 @@ export function TemplateSettings() {
 
     const importTemplate = async () => {
         try {
-            // Native open dialog handled Rust-side via the fs plugin is not
-            // wired here; use a simple text paste flow instead.
             const markdown = window.prompt('Paste a Meetily template Markdown file content:');
             if (!markdown) return;
             const savedId = await invoke<string>('api_import_template_markdown', { markdown });
@@ -188,20 +186,24 @@ export function TemplateSettings() {
     if (editor.kind !== 'closed') {
         const isBuiltinEdit = editor.kind === 'edit' && editor.builtin;
         return (
-            <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                    <h4 className="text-base font-semibold text-gray-900">
-                        {editor.kind === 'new' ? 'New Template' : `Edit: ${editor.templateId}`}
-                    </h4>
-                    <Button variant="ghost" size="sm" onClick={() => setEditor({ kind: 'closed' })}>
-                        Cancel
-                    </Button>
+            <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+                <div className="flex items-center justify-between mb-4">
+                    <div>
+                        <h3 className="text-lg font-semibold text-gray-900">
+                            {editor.kind === 'new' ? 'New Template' : 'Edit Template'}
+                        </h3>
+                        {editor.kind === 'edit' && (
+                            <p className="text-sm text-gray-600 mt-1">{editor.templateId}</p>
+                        )}
+                    </div>
                 </div>
+
                 {isBuiltinEdit && (
-                    <div className="p-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs">
+                    <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs">
                         This is a built-in template. Saving creates a custom override with the same ID.
                     </div>
                 )}
+
                 <Textarea
                     value={editorMarkdown}
                     onChange={(e) => setEditorMarkdown(e.target.value)}
@@ -209,9 +211,10 @@ export function TemplateSettings() {
                     className="font-mono text-xs"
                     spellCheck={false}
                 />
-                <div className="flex justify-end gap-2">
+
+                <div className="flex justify-end gap-2 mt-4">
                     <Button variant="outline" onClick={() => setEditor({ kind: 'closed' })}>
-                        Discard
+                        Cancel
                     </Button>
                     <Button onClick={saveEditor} disabled={saving}>
                         {saving ? 'Saving...' : 'Create Template'}
@@ -222,22 +225,35 @@ export function TemplateSettings() {
     }
 
     return (
-        <div className="space-y-4">
-            <div className="flex items-center justify-between">
-                <h4 className="text-lg font-semibold text-gray-900">Summary Templates</h4>
-                <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={importTemplate}>
-                        Import
-                    </Button>
-                    <Button size="sm" onClick={openNew}>New</Button>
+        <div className="flex flex-col gap-4">
+            {/* Toolbar card */}
+            <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h3 className="text-lg font-semibold text-gray-900 mb-2">Summary Templates</h3>
+                        <p className="text-sm text-gray-600">
+                            The selected template controls the structure of generated summaries.
+                            Built-in templates are read-only — copy one to customize.
+                        </p>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                        <Button variant="outline" size="sm" onClick={importTemplate}>
+                            <Upload className="h-4 w-4 mr-1" />
+                            Import
+                        </Button>
+                        <Button size="sm" onClick={openNew}>
+                            <Plus className="h-4 w-4 mr-1" />
+                            New
+                        </Button>
+                    </div>
                 </div>
             </div>
 
             {confirmDeleteId && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded text-sm">
-                    <p className="text-red-800 font-medium">Delete this template permanently?</p>
-                    <p className="text-red-600 text-xs mt-1">This cannot be undone.</p>
-                    <div className="flex gap-2 mt-2">
+                <div className="bg-white rounded-lg border border-red-200 p-4 shadow-sm">
+                    <p className="text-sm font-medium text-red-800">Delete this template permanently?</p>
+                    <p className="text-xs text-red-600 mt-1">This cannot be undone.</p>
+                    <div className="flex gap-2 mt-3">
                         <Button variant="destructive" size="sm" onClick={() => deleteTemplate(confirmDeleteId)}>
                             Delete
                         </Button>
@@ -249,52 +265,63 @@ export function TemplateSettings() {
             )}
 
             {loading ? (
-                <p className="text-sm text-gray-500">Loading templates...</p>
+                <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+                    <p className="text-sm text-gray-500">Loading templates...</p>
+                </div>
             ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {templates.map((t) => {
-                        const isBuiltin = t.id === 'daily_standup' || t.id === 'standard_meeting';
-                        return (
-                            <div
-                                key={t.id}
-                                className={`border rounded-lg p-3 cursor-pointer transition ${selectedId === t.id ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
-                                onClick={() => selectTemplate(t.id)}
-                            >
-                                <div className="flex items-start justify-between gap-2">
-                                    <div className="min-w-0">
-                                        <p className="font-medium text-sm text-gray-900 truncate">
-                                            {selectedId === t.id ? '✓ ' : ''}{t.name}
-                                        </p>
-                                        <p className="text-xs text-gray-500 line-clamp-2 mt-0.5">{t.description}</p>
-                                        <p className="text-[10px] text-gray-400 mt-1">
-                                            {t.id} {isBuiltin ? '· built-in' : '· custom'}
-                                        </p>
+                <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {templates.map((t) => {
+                            const isBuiltin = t.id === 'daily_standup' || t.id === 'standard_meeting';
+                            const isSelected = selectedId === t.id;
+                            return (
+                                <div
+                                    key={t.id}
+                                    onClick={() => selectTemplate(t.id)}
+                                    className={`border rounded-lg p-4 cursor-pointer transition ${isSelected ? 'border-blue-500 ring-1 ring-blue-500 bg-blue-50/50' : 'border-gray-200 hover:border-gray-300'}`}
+                                >
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div className="min-w-0">
+                                            <p className="font-medium text-sm text-gray-900 truncate">
+                                                {t.name}
+                                            </p>
+                                            <p className="text-xs text-gray-500 line-clamp-2 mt-1">{t.description}</p>
+                                            <p className="text-[10px] text-gray-400 mt-1.5">
+                                                {t.id} {isBuiltin ? '· built-in' : '· custom'}
+                                            </p>
+                                        </div>
+                                        {isSelected && (
+                                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-100 text-blue-700 shrink-0">
+                                                Active
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex gap-1 mt-3" onClick={(e) => e.stopPropagation()}>
+                                        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => openEdit(t.id)}>
+                                            <Pencil className="h-3 w-3 mr-1" />
+                                            Edit
+                                        </Button>
+                                        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => copyTemplate(t.id)}>
+                                            <Copy className="h-3 w-3 mr-1" />
+                                            Copy
+                                        </Button>
+                                        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => exportTemplate(t.id)}>
+                                            <Download className="h-3 w-3 mr-1" />
+                                            Export
+                                        </Button>
+                                        {!isBuiltin && (
+                                            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-red-600 hover:text-red-700" onClick={() => setConfirmDeleteId(t.id)}>
+                                                <Trash2 className="h-3 w-3 mr-1" />
+                                                Delete
+                                            </Button>
+                                        )}
                                     </div>
                                 </div>
-                                <div className="flex gap-1 mt-2" onClick={(e) => e.stopPropagation()}>
-                                    <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => openEdit(t.id)}>
-                                        Edit
-                                    </Button>
-                                    <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => copyTemplate(t.id)}>
-                                        Copy
-                                    </Button>
-                                    <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => exportTemplate(t.id)}>
-                                        Export
-                                    </Button>
-                                    {!isBuiltin && (
-                                        <Button variant="ghost" size="sm" className="h-7 text-xs text-red-600" onClick={() => setConfirmDeleteId(t.id)}>
-                                            Delete
-                                        </Button>
-                                    )}
-                                </div>
-                            </div>
-                        );
-                    })}
+                            );
+                        })}
+                    </div>
                 </div>
             )}
-            <p className="text-xs text-gray-500">
-                Selected template applies the next time a summary is generated. Built-in templates are read-only — copy one to customize.
-            </p>
         </div>
     );
 }

@@ -9,7 +9,7 @@ import { motion } from 'framer-motion';
 import { TranscriptSettings } from '@/components/TranscriptSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
-import { SummaryModelSettings } from '@/components/SummaryModelSettings';
+import { SummarySettings } from '@/components/SummarySettings';
 import { BetaSettings } from '@/components/BetaSettings';
 import { useConfig } from '@/contexts/ConfigContext';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -124,10 +124,7 @@ export default function SettingsPage() {
               />
             </TabsContent>
             <TabsContent value="summaryModels">
-              <SummaryModelSettings />
-            </TabsContent>
-            <TabsContent value="templates" className="mt-6">
-              <TemplateSettings />
+              <SummarySettings />
             </TabsContent>
             <TabsContent value="beta" className="mt-6">
               <BetaSettings />
