@@ -88,6 +88,7 @@ pub fn start_transcription_task<R: Runtime>(
             let engine_clone = match &transcription_engine {
                 TranscriptionEngine::Whisper(e) => TranscriptionEngine::Whisper(e.clone()),
                 TranscriptionEngine::Parakeet(e) => TranscriptionEngine::Parakeet(e.clone()),
+                TranscriptionEngine::Gipformer(e) => TranscriptionEngine::Gipformer(e.clone()),
                 TranscriptionEngine::Provider(p) => TranscriptionEngine::Provider(p.clone()),
             };
             let app_clone = app.clone();
@@ -460,6 +461,43 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                 Err(e) => {
                     error!(
                         "Whisper transcription failed for chunk {}: {}",
+                        chunk.chunk_id, e
+                    );
+
+                    let transcription_error = TranscriptionError::EngineFailed(e.to_string());
+                    let _ = app.emit(
+                        "transcription-error",
+                        &serde_json::json!({
+                            "error": transcription_error.to_string(),
+                            "userMessage": format!("Transcription failed: {}", transcription_error),
+                            "actionable": false,
+                            "phase": "active"
+                        }),
+                    );
+
+                    Err(transcription_error)
+                }
+            }
+        }
+        TranscriptionEngine::Gipformer(gipformer_engine) => {
+            match gipformer_engine.transcribe_audio(speech_samples).await {
+                Ok(text) => {
+                    let cleaned_text = text.trim().to_string();
+                    if cleaned_text.is_empty() {
+                        return Ok((String::new(), None, false));
+                    }
+
+                    info!(
+                        "Gipformer transcription complete for chunk {}: '{}'",
+                        chunk.chunk_id, cleaned_text
+                    );
+
+                    // Gipformer doesn't provide confidence or partial results
+                    Ok((cleaned_text, None, false))
+                }
+                Err(e) => {
+                    error!(
+                        "Gipformer transcription failed for chunk {}: {}",
                         chunk.chunk_id, e
                     );
 

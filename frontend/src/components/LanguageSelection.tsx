@@ -118,7 +118,7 @@ interface LanguageSelectionProps {
   selectedLanguage: string;
   onLanguageChange: (language: string) => void;
   disabled?: boolean;
-  provider?: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+  provider?: 'localWhisper' | 'parakeet' | 'gipformer' | 'openai-compatible' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
 }
 
 export function LanguageSelection({
@@ -130,9 +130,9 @@ export function LanguageSelection({
   const [saving, setSaving] = useState(false);
   const { setSelectedLanguage } = useConfig();
 
-  // Parakeet only supports auto-detection (doesn't support manual language selection)
-  const isParakeet = provider === 'parakeet';
-  const availableLanguages = isParakeet
+  // Parakeet and Gipformer only support auto-detection (fixed language models)
+  const isFixedLanguage = provider === 'parakeet' || provider === 'gipformer';
+  const availableLanguages = isFixedLanguage
     ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate')
     : LANGUAGES;
 
@@ -197,11 +197,11 @@ export function LanguageSelection({
           ))}
         </select>
 
-        {/* Parakeet language limitation warning */}
-        {isParakeet && (
+        {/* Fixed-language model warning (Parakeet / Gipformer) */}
+        {isFixedLanguage && (
           <div className="p-2 bg-amber-50 border border-amber-200 rounded text-amber-800">
-            <p className="font-medium">ℹ️ Parakeet Language Support</p>
-            <p className="mt-1 text-xs">Parakeet currently only supports automatic language detection. Manual language selection is not available. Use Whisper if you need to specify a particular language.</p>
+            <p className="font-medium">ℹ️ {provider === 'gipformer' ? 'Gipformer' : 'Parakeet'} Language Support</p>
+            <p className="mt-1 text-xs">This model automatically handles its target language (Gipformer is Vietnamese-only). Manual language selection is not available. Use Whisper if you need to specify a particular language.</p>
           </div>
         )}
 

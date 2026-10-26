@@ -15,6 +15,7 @@ use tauri::{AppHandle, Manager, Runtime};
 pub enum TranscriptionEngine {
     Whisper(Arc<crate::whisper_engine::WhisperEngine>),  // Direct access (backward compat)
     Parakeet(Arc<crate::parakeet_engine::ParakeetEngine>), // Direct access (backward compat)
+    Gipformer(Arc<crate::gipformer_engine::GipformerEngine>), // Direct access (backward compat)
     Provider(Arc<dyn TranscriptionProvider>),  // Trait-based (preferred for new code)
 }
 
@@ -24,6 +25,7 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(engine) => engine.is_model_loaded().await,
             Self::Parakeet(engine) => engine.is_model_loaded().await,
+            Self::Gipformer(engine) => engine.is_model_loaded().await,
             Self::Provider(provider) => provider.is_model_loaded().await,
         }
     }
@@ -33,6 +35,7 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(engine) => engine.get_current_model().await,
             Self::Parakeet(engine) => engine.get_current_model().await,
+            Self::Gipformer(engine) => engine.get_current_model().await,
             Self::Provider(provider) => provider.get_current_model().await,
         }
     }
@@ -42,6 +45,7 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(_) => "Whisper (direct)",
             Self::Parakeet(_) => "Parakeet (direct)",
+            Self::Gipformer(_) => "Gipformer (direct)",
             Self::Provider(provider) => provider.provider_name(),
         }
     }
@@ -135,10 +139,46 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                 }
             }
         }
+        "gipformer" => {
+            info!("🔍 Validating Gipformer model...");
+            // Ensure gipformer engine is initialized first
+            if let Err(init_error) = crate::gipformer_engine::commands::gipformer_init().await {
+                warn!("❌ Failed to initialize Gipformer engine: {}", init_error);
+                return Err(format!(
+                    "Failed to initialize Gipformer speech recognition: {}",
+                    init_error
+                ));
+            }
+
+            match crate::gipformer_engine::commands::gipformer_validate_model_ready_with_config(
+                serde_json::json!({ "provider": "gipformer" }),
+            )
+            .await
+            {
+                Ok(true) => {
+                    info!("✅ Gipformer model validation successful");
+                    Ok(())
+                }
+                Ok(false) => {
+                    warn!("❌ Gipformer model validation failed: no model loaded");
+                    Err("Gipformer engine has no model loaded. Please select and download a Gipformer model first.".to_string())
+                }
+                Err(e) => {
+                    warn!("❌ Gipformer model validation failed: {}", e);
+                    Err(e)
+                }
+            }
+        }
+        "openai-compatible" => {
+            // Config existence is validated when the engine is built; the
+            // connection itself is exercised per transcription request.
+            info!("✅ OpenAI-compatible transcription provider requires no local model");
+            Ok(())
+        }
         other => {
             warn!("❌ Unsupported transcription provider for local recording: {}", other);
             Err(format!(
-                "Provider '{}' is not supported for local transcription. Please select 'localWhisper' or 'parakeet'.",
+                "Provider '{}' is not supported for local transcription. Please select 'localWhisper', 'parakeet', 'gipformer', or 'openai-compatible'.",
                 other
             ))
         }
@@ -211,6 +251,45 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                     Err("Parakeet engine not initialized. This should not happen after validation.".to_string())
                 }
             }
+        }
+        "gipformer" => {
+            info!("🐹 Initializing Gipformer transcription engine");
+
+            let engine = {
+                let guard = crate::gipformer_engine::commands::GIPFORMER_ENGINE
+                    .lock()
+                    .unwrap();
+                guard.as_ref().cloned()
+            };
+
+            match engine {
+                Some(engine) => {
+                    if engine.is_model_loaded().await {
+                        let model_name = engine.get_current_model().await
+                            .unwrap_or_else(|| "unknown".to_string());
+                        info!("✅ Gipformer model '{}' already loaded", model_name);
+                        Ok(TranscriptionEngine::Gipformer(engine))
+                    } else {
+                        Err("Gipformer engine initialized but no model loaded. This should not happen after validation.".to_string())
+                    }
+                }
+                None => {
+                    Err("Gipformer engine not initialized. This should not happen after validation.".to_string())
+                }
+            }
+        }
+        "openai-compatible" => {
+            info!("🌐 Initializing OpenAI-compatible transcription provider");
+
+            let pool = app.state::<crate::state::AppState>().db_manager.pool().clone();
+            let provider = crate::audio::transcription::OpenAICompatibleProvider::new();
+            provider.load_config(&pool).await?;
+            if !provider.is_model_loaded().await {
+                return Err(
+                    "No OpenAI-compatible transcription endpoint configured. Please configure the endpoint in Transcript Settings.".to_string(),
+                );
+            }
+            Ok(TranscriptionEngine::Provider(Arc::new(provider)))
         }
         "localWhisper" | _ => {
             info!("🎤 Initializing Whisper transcription engine");

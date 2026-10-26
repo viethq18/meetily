@@ -1,0 +1,33 @@
+[package]
+name = "silero"
+version = "0.1.0"
+repository = "https://github.com/emotechlab/Silero"
+readme = "README.md"
+license = "MIT"
+edition = "2021"
+
+[features]
+default = ["static-model", "audio_resampler"]
+static-model = []
+audio_resampler = ["dep:rubato"]
+serde = ["dep:serde"]
+
+[dependencies]
+anyhow = "1.0.86"
+ndarray = "0.17"
+ort = { version = "2.0.0-rc.15", features = ["ndarray"] }
+rubato = { version = "0.16.0", optional = true}
+serde = { version = "1.0.208", features = ["derive"], optional = true }
+thiserror = "2.0.4"
+tracing = { version = "0.1.40", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+approx = "0.5.1"
+divan = "0.1.15"
+hound = "3.5.1"
+serde_json = "1.0.125"
+tracing-test = "0.2.5"
+
+[[bench]]
+name = "usage"
+harness = false

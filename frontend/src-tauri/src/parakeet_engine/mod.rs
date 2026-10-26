@@ -19,8 +19,9 @@
 
 pub mod parakeet_engine;
 pub mod model;
+pub mod nemo80_mel;
+pub mod nemo80_features;
 pub mod commands;
-
 pub use parakeet_engine::{ParakeetEngine, ParakeetEngineError, QuantizationType, ModelInfo, ModelStatus, DownloadProgress};
 pub use model::{ParakeetModel, ParakeetError, TimestampedResult};
 pub use commands::*;

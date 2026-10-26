@@ -7,10 +7,11 @@ import { Label } from './ui/label';
 import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
-
+import { GipformerModelManager } from './GipformerModelManager';
+import { toast } from 'sonner';
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'parakeet' | 'gipformer' | 'openai-compatible' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
     model: string;
     apiKey?: string | null;
 }
@@ -27,6 +28,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    const [openaiEndpoint, setOpenaiEndpoint] = useState('');
+    const [openaiApiKey, setOpenaiApiKey] = useState('');
+    const [openaiModel, setOpenaiModel] = useState('');
+    const [openaiConfigLoaded, setOpenaiConfigLoaded] = useState(false);
+    const [isTestingOpenai, setIsTestingOpenai] = useState(false);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -34,10 +40,31 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     }, [transcriptModelConfig.provider]);
 
     useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet') {
+        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'gipformer') {
             setApiKey(null);
         }
     }, [transcriptModelConfig.provider]);
+
+    // Load stored OpenAI-compatible transcription config once
+    useEffect(() => {
+        if (openaiConfigLoaded) return;
+        setOpenaiConfigLoaded(true);
+        (async () => {
+            try {
+                const config = await invoke<{ endpoint: string; api_key?: string | null; model: string } | null>(
+                    'api_get_transcript_openai_config'
+                );
+                if (config) {
+                    setOpenaiEndpoint(config.endpoint);
+                    setOpenaiApiKey(config.api_key || '');
+                    setOpenaiModel(config.model);
+                }
+            } catch (err) {
+                console.error('Failed to load OpenAI-compatible transcription config:', err);
+            }
+        })();
+    }, [openaiConfigLoaded]);
+
 
     const fetchApiKey = async (provider: string) => {
         try {
@@ -53,6 +80,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const modelOptions = {
         localWhisper: [], // Model selection handled by ModelManager component
         parakeet: [], // Model selection handled by ParakeetModelManager component
+        gipformer: [], // Model selection handled by GipformerModelManager component
+        'openai-compatible': [], // Model configured via endpoint form below
         deepgram: ['nova-2-phonecall'],
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
@@ -95,6 +124,60 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
+    const handleGipformerModelSelect = (modelName: string) => {
+        setTranscriptModelConfig({
+            ...transcriptModelConfig,
+            provider: 'gipformer',
+            model: modelName
+        });
+        if (onModelSelect) {
+            onModelSelect();
+        }
+    };
+
+    const handleSaveOpenaiConfig = async () => {
+        try {
+            await invoke('api_save_transcript_openai_config', {
+                endpoint: openaiEndpoint,
+                apiKey: openaiApiKey || null,
+                model: openaiModel,
+            });
+            setTranscriptModelConfig({
+                ...transcriptModelConfig,
+                provider: 'openai-compatible',
+                model: openaiModel,
+            });
+            toast.success('OpenAI-compatible transcription config saved');
+        } catch (err) {
+            toast.error('Failed to save config', {
+                description: err instanceof Error ? err.message : String(err),
+            });
+        }
+    };
+
+    const handleTestOpenaiConnection = async () => {
+        if (isTestingOpenai) return;
+        setIsTestingOpenai(true);
+        try {
+            const result = await invoke<{ status: string; message: string }>(
+                'api_test_transcript_openai_connection',
+                {
+                    endpoint: openaiEndpoint,
+                    apiKey: openaiApiKey || null,
+                    model: openaiModel,
+                }
+            );
+            toast.success('Connection successful');
+        } catch (err) {
+            toast.error('Connection failed', {
+                description: err instanceof Error ? err.message : String(err),
+                duration: 6000,
+            });
+        } finally {
+            setIsTestingOpenai(false);
+        }
+    };
+
     return (
         <div>
             <div>
@@ -122,6 +205,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectTrigger>
                                 <SelectContent>
                                     <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
+                                    <SelectItem value="gipformer">🐹 Gipformer (Vietnamese - Fast / Accurate)</SelectItem>
+                                    <SelectItem value="openai-compatible">🌐 OpenAI Compatible (Custom Endpoint)</SelectItem>
                                     <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
                                     <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
@@ -171,6 +256,73 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             />
                         </div>
                     )}
+                    {uiProvider === 'gipformer' && (
+                        <div className="mt-6">
+                            <GipformerModelManager
+                                selectedModel={transcriptModelConfig.provider === 'gipformer' ? transcriptModelConfig.model : undefined}
+                                onModelSelect={handleGipformerModelSelect}
+                                autoSave={true}
+                            />
+                        </div>
+                    )}
+
+                    {uiProvider === 'openai-compatible' && (
+                        <div className="mt-6 space-y-4">
+                            <div>
+                                <Label className="block text-sm font-medium text-gray-700 mb-1">
+                                    Endpoint URL
+                                </Label>
+                                <Input
+                                    className="mx-1 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                                    value={openaiEndpoint}
+                                    onChange={(e) => setOpenaiEndpoint(e.target.value)}
+                                    placeholder="http://localhost:8000/v1"
+                                />
+                            </div>
+                            <div>
+                                <Label className="block text-sm font-medium text-gray-700 mb-1">
+                                    Model
+                                </Label>
+                                <Input
+                                    className="mx-1 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                                    value={openaiModel}
+                                    onChange={(e) => setOpenaiModel(e.target.value)}
+                                    placeholder="whisper-1"
+                                />
+                            </div>
+                            <div>
+                                <Label className="block text-sm font-medium text-gray-700 mb-1">
+                                    API Key (optional)
+                                </Label>
+                                <Input
+                                    type="password"
+                                    className="mx-1 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                                    value={openaiApiKey}
+                                    onChange={(e) => setOpenaiApiKey(e.target.value)}
+                                    placeholder="Bearer token if your endpoint requires one"
+                                />
+                            </div>
+                            <div className="flex space-x-2 mx-1">
+                                <Button
+                                    variant="outline"
+                                    onClick={handleTestOpenaiConnection}
+                                    disabled={isTestingOpenai || !openaiEndpoint || !openaiModel}
+                                >
+                                    {isTestingOpenai ? 'Testing...' : 'Test Connection'}
+                                </Button>
+                                <Button
+                                    onClick={handleSaveOpenaiConfig}
+                                    disabled={!openaiEndpoint || !openaiModel}
+                                >
+                                    Save Configuration
+                                </Button>
+                            </div>
+                            <p className="text-xs text-gray-500 mx-1">
+                                Audio is sent to <code>{'{endpoint}'}/audio/transcriptions</code> as a WAV upload.
+                            </p>
+                        </div>
+                    )}
+
 
 
                     {requiresApiKey && (

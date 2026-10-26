@@ -1,6 +1,5 @@
 use ndarray::{Array, Array1, Array2, Array3, ArrayD, ArrayViewD, IxDyn};
 use once_cell::sync::Lazy;
-use ort::execution_providers::CPUExecutionProvider;
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -14,6 +13,26 @@ pub type DecoderState = (Array3<f32>, Array3<f32>);
 
 const SUBSAMPLING_FACTOR: usize = 8;
 const WINDOW_SIZE: f32 = 0.01;
+
+/// Decode architecture of a Parakeet ONNX export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoderKind {
+    /// Transducer with TDT durations: encoder + decoder_joint + preprocessor ONNX.
+    Tdt,
+    /// CTC single ONNX: input [N, 80, T] NeMo-80 mel features, output logprobs.
+    Ctc,
+}
+
+impl DecoderKind {
+    /// Infer the decode architecture from a model name (catalogued specs).
+    pub fn from_model_name(model_name: &str) -> Self {
+        if model_name.contains("ctc") {
+            Self::Ctc
+        } else {
+            Self::Tdt
+        }
+    }
+}
 const MAX_TOKENS_PER_STEP: usize = 3;
 const TDT_DURATIONS: [usize; 5] = [0, 1, 2, 3, 4];
 
@@ -31,6 +50,8 @@ pub struct TimestampedResult {
 pub enum ParakeetError {
     #[error("ORT error")]
     Ort(#[from] ort::Error),
+    #[error("ORT session builder error")]
+    Builder(#[from] ort::Error<ort::session::builder::SessionBuilder>),
     #[error("I/O error")]
     Io(#[from] std::io::Error),
     #[error("ndarray shape error")]
@@ -43,12 +64,18 @@ pub enum ParakeetError {
     TensorShape(String),
     #[error("ONNX Runtime unavailable: {0}")]
     RuntimeUnavailable(String),
+    #[error("Engine error: {0}")]
+    EngineFailed(String),
 }
 
 pub struct ParakeetModel {
-    encoder: Session,
-    decoder_joint: Session,
-    preprocessor: Session,
+    /// Transducer (TDT) sessions: encoder + decoder_joint + preprocessor.
+    encoder: Option<Session>,
+    decoder_joint: Option<Session>,
+    preprocessor: Option<Session>,
+    /// CTC session: single ONNX taking [N, 80, T] NeMo-80 mel features.
+    ctc: Option<Session>,
+    decode_kind: DecoderKind,
     vocab: Vec<String>,
     blank_idx: i32,
     vocab_size: usize,
@@ -62,23 +89,44 @@ impl Drop for ParakeetModel {
 
 impl ParakeetModel {
     pub fn new<P: AsRef<Path>>(model_dir: P, quantized: bool) -> Result<Self, ParakeetError> {
-        let encoder = Self::init_session(&model_dir, "encoder-model", None, quantized)?;
-        let decoder_joint = Self::init_session(&model_dir, "decoder_joint-model", None, quantized)?;
-        let preprocessor = Self::init_session(&model_dir, "nemo128", None, false)?;
+        Self::new_with_kind(model_dir, quantized, DecoderKind::Tdt)
+    }
+
+    pub fn new_with_kind<P: AsRef<Path>>(
+        model_dir: P,
+        quantized: bool,
+        decode_kind: DecoderKind,
+    ) -> Result<Self, ParakeetError> {
+        let (encoder, decoder_joint, preprocessor, ctc) = match decode_kind {
+            DecoderKind::Tdt => {
+                let encoder = Self::init_session(&model_dir, "encoder-model", None, quantized)?;
+                let decoder_joint =
+                    Self::init_session(&model_dir, "decoder_joint-model", None, quantized)?;
+                let preprocessor = Self::init_session(&model_dir, "nemo128", None, false)?;
+                (Some(encoder), Some(decoder_joint), Some(preprocessor), None)
+            }
+            DecoderKind::Ctc => {
+                let ctc = Self::init_session(&model_dir, "model", None, quantized)?;
+                (None, None, None, Some(ctc))
+            }
+        };
 
         let (vocab, blank_idx) = Self::load_vocab(&model_dir)?;
         let vocab_size = vocab.len();
 
         log::info!(
-            "Loaded Parakeet vocabulary with {} tokens, blank_idx={}",
+            "Loaded Parakeet vocabulary with {} tokens, blank_idx={}, decoder={:?}",
             vocab_size,
-            blank_idx
+            blank_idx,
+            decode_kind
         );
 
         Ok(Self {
             encoder,
             decoder_joint,
             preprocessor,
+            ctc,
+            decode_kind,
             vocab,
             blank_idx,
             vocab_size,
@@ -93,8 +141,8 @@ impl ParakeetModel {
     ) -> Result<Session, ParakeetError> {
         crate::ensure_onnx_runtime_available()
             .map_err(|error| ParakeetError::RuntimeUnavailable(error.to_string()))?;
+        let providers = vec![ort::ep::CPU::default().build()];
 
-        let providers = vec![CPUExecutionProvider::default().build()];
 
         // Try quantized version first if requested, fallback to regular version
         let model_filename = if try_quantized {
@@ -116,8 +164,7 @@ impl ParakeetModel {
             log::info!("Loading Parakeet model from {}...", regular_name);
             regular_name
         };
-
-        let mut builder = Session::builder()?
+        let mut builder = Session::builder(crate::ort_env())?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_execution_providers(providers)?
             .with_parallel_execution(true)?;
@@ -130,12 +177,12 @@ impl ParakeetModel {
 
         let session = builder.commit_from_file(model_dir.as_ref().join(&model_filename))?;
 
-        for input in &session.inputs {
+        for input in session.inputs() {
             log::info!(
                 "Parakeet Model '{}' input: name={}, type={:?}",
                 model_filename,
-                input.name,
-                input.input_type
+                input.name(),
+                input.dtype()
             );
         }
 
@@ -190,7 +237,7 @@ impl ParakeetModel {
             "waveforms" => TensorRef::from_array_view(waveforms.view())?,
             "waveforms_lens" => TensorRef::from_array_view(waveforms_lens.view())?,
         ];
-        let outputs = self.preprocessor.run(inputs)?;
+        let outputs = self.preprocessor.as_mut().ok_or_else(|| ParakeetError::EngineFailed("preprocessor session not loaded (CTC model)".into()))?.run(inputs)?;
 
         let features = outputs
             .get("features")
@@ -214,7 +261,7 @@ impl ParakeetModel {
             "audio_signal" => TensorRef::from_array_view(audio_signal.view())?,
             "length" => TensorRef::from_array_view(length.view())?,
         ];
-        let outputs = self.encoder.run(inputs)?;
+        let outputs = self.encoder.as_mut().ok_or_else(|| ParakeetError::EngineFailed("encoder session not loaded (CTC model)".into()))?.run(inputs)?;
 
         let encoder_output = outputs
             .get("outputs")
@@ -232,21 +279,21 @@ impl ParakeetModel {
 
     pub fn create_decoder_state(&self) -> Result<DecoderState, ParakeetError> {
         // Get input shapes from decoder model
-        let inputs = &self.decoder_joint.inputs;
+        let inputs = self.decoder_joint.as_ref().ok_or_else(|| ParakeetError::EngineFailed("decoder_joint session not loaded (CTC model)".into()))?.inputs();
 
         let state1_shape = inputs
             .iter()
-            .find(|input| input.name == "input_states_1")
+            .find(|input| input.name() == "input_states_1")
             .ok_or_else(|| ParakeetError::InputNotFound("input_states_1".to_string()))?
-            .input_type
+            .dtype()
             .tensor_shape()
             .ok_or_else(|| ParakeetError::TensorShape("input_states_1".to_string()))?;
 
         let state2_shape = inputs
             .iter()
-            .find(|input| input.name == "input_states_2")
+            .find(|input| input.name() == "input_states_2")
             .ok_or_else(|| ParakeetError::InputNotFound("input_states_2".to_string()))?
-            .input_type
+            .dtype()
             .tensor_shape()
             .ok_or_else(|| ParakeetError::TensorShape("input_states_2".to_string()))?;
 
@@ -294,7 +341,7 @@ impl ParakeetModel {
             "input_states_2" => TensorRef::from_array_view(prev_state.1.view())?,
         ];
 
-        let outputs = self.decoder_joint.run(inputs)?;
+        let outputs = self.decoder_joint.as_mut().ok_or_else(|| ParakeetError::EngineFailed("decoder_joint session not loaded (CTC model)".into()))?.run(inputs)?;
 
         let logits = outputs
             .get("outputs")
@@ -478,6 +525,16 @@ impl ParakeetModel {
         &mut self,
         samples: Vec<f32>,
     ) -> Result<TimestampedResult, ParakeetError> {
+        match self.decode_kind {
+            DecoderKind::Ctc => self.transcribe_samples_ctc(samples),
+            DecoderKind::Tdt => self.transcribe_samples_tdt(samples),
+        }
+    }
+
+    fn transcribe_samples_tdt(
+        &mut self,
+        samples: Vec<f32>,
+    ) -> Result<TimestampedResult, ParakeetError> {
         let batch_size = 1;
         let samples_len = samples.len();
 
@@ -499,5 +556,87 @@ impl ParakeetModel {
         })?;
 
         Ok(timestamped_result)
+    }
+
+    /// CTC path: NeMo-80 mel features -> single ONNX -> greedy CTC decode.
+    fn transcribe_samples_ctc(
+        &mut self,
+        samples: Vec<f32>,
+    ) -> Result<TimestampedResult, ParakeetError> {
+        let blank_idx = self.blank_idx;
+        let (features, frames) = crate::parakeet_engine::nemo80_features::compute_nemo80_features(&samples);
+        if frames == 0 {
+            return Ok(TimestampedResult {
+                text: String::new(),
+                timestamps: Vec::new(),
+                tokens: Vec::new(),
+            });
+        }
+
+        // Features [T, 80] -> model input [1, 80, T]
+        let mut transposed = vec![0f32; frames * 80];
+        for t in 0..frames {
+            for b in 0..80 {
+                transposed[b * frames + t] = features[t * 80 + b];
+            }
+        }
+        let audio_signal = Array3::from_shape_vec((1, 80, frames), transposed)?;
+        let length = Array1::from_vec(vec![frames as i64]);
+
+        let outputs = {
+            let ctc = self.ctc.as_mut().ok_or_else(|| {
+                ParakeetError::EngineFailed("CTC session not loaded (TDT model)".to_string())
+            })?;
+            ctc.run(inputs![
+                "audio_signal" => TensorRef::from_array_view(audio_signal.view())?,
+                "length" => TensorRef::from_array_view(length.view())?,
+            ])?
+        };
+
+
+        let logprobs = outputs
+            .get("logprobs")
+            .ok_or_else(|| ParakeetError::OutputNotFound("logprobs".to_string()))?
+            .try_extract_array::<f32>()?;
+
+        // [1, T', vocab] -> [T', vocab]
+        let logprobs = logprobs.to_owned().remove_axis(ndarray::Axis(0));
+        let logprobs = logprobs.into_dimensionality::<ndarray::Ix2>()?;
+
+        // Greedy CTC: argmax per timestep, collapse repeats, strip blank.
+        let mut ids: Vec<i32> = Vec::new();
+        let mut timestamps: Vec<usize> = Vec::new();
+        let mut prev: i32 = -1;
+        for (t, row) in logprobs.outer_iter().enumerate() {
+            let token = row
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx as i32)
+                .unwrap_or(blank_idx);
+            if token != prev && token != blank_idx {
+                ids.push(token);
+                timestamps.push(t);
+            }
+            prev = token;
+        }
+
+        if ids.is_empty() {
+            log::debug!(
+                "Parakeet CTC decoded zero tokens for {} timesteps - audio may be silence",
+                logprobs.nrows()
+            );
+        }
+        drop(outputs);
+
+        // Reuse the TDT token-to-text path (same vocab format and spacing rules).
+        let mut result = self.decode_tokens(ids, timestamps);
+        // CTC emits one timestep per 8 frames (0.08s steps), same subsampling as TDT.
+        result.timestamps = result
+            .timestamps
+            .iter()
+            .map(|&t| WINDOW_SIZE * SUBSAMPLING_FACTOR as f32 * t as f32)
+            .collect();
+        Ok(result)
     }
 }

@@ -16,3 +16,9 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.32.0", features = ["full"] }
+
+# Pin the whole workspace (including the silero-rs git dependency) to a newer
+# ONNX Runtime: ORT 1.22 (ort 2.0.0-rc.10) lacks the ConvInteger kernel needed
+# by the Parakeet CTC Vietnamese int8 model. ort 2.0.0-rc.15 bundles ORT 1.25.
+[patch."https://github.com/emotechlab/silero-rs"]
+silero = { path = "vendor/silero" }

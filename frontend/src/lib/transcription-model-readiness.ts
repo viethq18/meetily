@@ -19,6 +19,11 @@ const PROVIDER_COMMANDS: Record<string, ProviderCommands> = {
     hasAvailableModels: 'parakeet_has_available_models',
     getAvailableModels: 'parakeet_get_available_models',
   },
+  gipformer: {
+    initialize: 'gipformer_init',
+    hasAvailableModels: 'gipformer_has_available_models',
+    getAvailableModels: 'gipformer_get_available_models',
+  },
 };
 
 export function getProviderCommands(provider: string): ProviderCommands | null {

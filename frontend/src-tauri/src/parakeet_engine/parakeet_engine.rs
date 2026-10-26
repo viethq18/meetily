@@ -116,6 +116,10 @@ const PARAKEET_V2_ARTIFACTS: &[ArtifactSpec] = &[
     ArtifactSpec { filename: "nemo128.onnx", exact_bytes: 139_764 },
     ArtifactSpec { filename: "vocab.txt", exact_bytes: 9_384 },
 ];
+const PARAKEET_CTC_VI_ARTIFACTS: &[ArtifactSpec] = &[
+    ArtifactSpec { filename: "model.int8.onnx", exact_bytes: 653_534_132 },
+    ArtifactSpec { filename: "vocab.txt", exact_bytes: 11_016 },
+];
 
 const PARAKEET_MODEL_SPECS: &[ModelSpec] = &[
     ModelSpec {
@@ -136,8 +140,16 @@ const PARAKEET_MODEL_SPECS: &[ModelSpec] = &[
         source_base_url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85",
         artifacts: PARAKEET_V2_ARTIFACTS,
     },
+    ModelSpec {
+        name: "parakeet-ctc-0.6b-vietnamese-int8",
+        size_mb: 653,
+        quantization: QuantizationType::Int8,
+        speed: "Fast (Vietnamese)",
+        description: "Vietnamese-optimized Parakeet CTC model, best accuracy for Vietnamese meetings",
+        source_base_url: "https://huggingface.co/OpenVoiceOS/nvidia-parakeet-ctc-0.6b-vietnamese-onnx/resolve/main",
+        artifacts: PARAKEET_CTC_VI_ARTIFACTS,
+    },
 ];
-
 fn find_model_spec(model_name: &str) -> Option<&'static ModelSpec> {
     PARAKEET_MODEL_SPECS
         .iter()
@@ -464,13 +476,15 @@ impl ParakeetEngine {
                 let model_lifecycle_test_hook = self.load_test_hook().await;
                 #[cfg(test)]
                 let runtime_handle = tokio::runtime::Handle::current();
+                let model_name_owned = model_name.to_string();
                 let model = tokio::task::spawn_blocking(move || {
                     #[cfg(test)]
                     if let Some(hook) = model_lifecycle_test_hook {
                         hook.load_started.notify_one();
                         runtime_handle.block_on(hook.continue_load.notified());
                     }
-                    ParakeetModel::new(&model_path, quantized)
+                    let decode_kind = crate::parakeet_engine::model::DecoderKind::from_model_name(&model_name_owned);
+                    ParakeetModel::new_with_kind(&model_path, quantized, decode_kind)
                         .map_err(|error| error.to_string())
                 })
                 .await

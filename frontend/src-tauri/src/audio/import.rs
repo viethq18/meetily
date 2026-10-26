@@ -266,19 +266,21 @@ pub async fn start_import<R: Runtime>(
     // Reset cancellation flag
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
     let result = run_import(
         app.clone(),
         source_path,
         title,
         language,
         model,
-        provider,
+        provider.clone(),
     )
     .await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    super::common::unload_engine_after_batch(
+        provider.as_deref().unwrap_or("localWhisper"),
+    )
+    .await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -330,7 +332,7 @@ async fn run_import<R: Runtime>(
     );
 
     // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let provider_str = provider.as_deref().unwrap_or("localWhisper").to_string();
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
 
@@ -509,16 +511,38 @@ async fn run_import<R: Runtime>(
     emit_progress(&app, "transcribing", 30, "Loading transcription engine...");
 
     // Initialize the appropriate engine
-    let whisper_engine = if !use_parakeet && total_segments > 0 {
+    let whisper_engine = if provider_str == "localWhisper" && total_segments > 0 {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
     } else {
         None
     };
-    let parakeet_engine = if use_parakeet && total_segments > 0 {
+    let parakeet_engine = if provider_str == "parakeet" && total_segments > 0 {
         Some(get_or_init_parakeet(&app, model.as_deref()).await?)
     } else {
         None
     };
+    let gipformer_engine = if provider_str == "gipformer" && total_segments > 0 {
+        Some(get_or_init_gipformer(&app, model.as_deref()).await?)
+    } else {
+        None
+    };
+    let openai_compatible_engine =
+        if provider_str == "openai-compatible" && total_segments > 0 {
+            Some(crate::audio::transcription::OpenAICompatibleProvider::new())
+        } else {
+            None
+        };
+    if provider_str == "openai-compatible" && total_segments > 0 {
+        let app_state = app
+            .try_state::<AppState>()
+            .ok_or_else(|| anyhow!("App state not available"))?;
+        openai_compatible_engine
+            .as_ref()
+            .unwrap()
+            .load_config(app_state.db_manager.pool())
+            .await
+            .map_err(|e| anyhow!(e))?;
+    }
 
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
@@ -580,20 +604,42 @@ async fn run_import<R: Runtime>(
         }
 
         // Transcribe
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
+        let (text, conf) = match provider_str.as_str() {
+            "parakeet" => {
+                let engine = parakeet_engine.as_ref().unwrap();
+                let text = engine
+                    .transcribe_audio(segment.samples.clone())
+                    .await
+                    .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
+                (text, 0.9f32)
+            }
+            "gipformer" => {
+                let engine = gipformer_engine.as_ref().unwrap();
+                let text = engine
+                    .transcribe_audio(segment.samples.clone())
+                    .await
+                    .map_err(|e| anyhow!("Gipformer transcription failed on segment {}: {}", i, e))?;
+                (text, 0.9f32)
+            }
+            "openai-compatible" => {
+                let engine = openai_compatible_engine.as_ref().unwrap();
+                let result = crate::audio::transcription::TranscriptionProvider::transcribe(
+                    engine,
+                    segment.samples.clone(),
+                    language.clone(),
+                )
                 .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
+                .map_err(|e| anyhow!("OpenAI-compatible transcription failed on segment {}: {}", i, e))?;
+                (result.text, result.confidence.unwrap_or(0.9f32))
+            }
+            _ => {
+                let engine = whisper_engine.as_ref().unwrap();
+                let (text, conf, _) = engine
+                    .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
+                    .await
+                    .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
+                (text, conf)
+            }
         };
 
         let trimmed = text.trim();
@@ -837,6 +883,52 @@ async fn get_or_init_parakeet<R: Runtime>(
             Ok(e)
         }
         None => Err(anyhow!("Parakeet engine not initialized")),
+    }
+}
+
+/// Get or initialize the Gipformer engine
+async fn get_or_init_gipformer<R: Runtime>(
+    app: &AppHandle<R>,
+    requested_model: Option<&str>,
+) -> Result<Arc<crate::gipformer_engine::GipformerEngine>> {
+    use crate::gipformer_engine::commands::GIPFORMER_ENGINE;
+
+    let engine = {
+        let guard = GIPFORMER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().cloned()
+    };
+
+    match engine {
+        Some(e) => {
+            let target_model = match requested_model {
+                Some(model) => model.to_string(),
+                None => "gipformer1.5-68M-rnnt".to_string(),
+            };
+
+            let current_model = e.get_current_model().await;
+            let needs_load = match &current_model {
+                Some(loaded) => loaded != &target_model,
+                None => true,
+            };
+
+            if needs_load {
+                info!(
+                    "Loading Gipformer model '{}' (current: {:?})",
+                    target_model, current_model
+                );
+
+                if let Err(e) = e.discover_models().await {
+                    warn!("Model discovery error (continuing): {}", e);
+                }
+
+                e.load_model(&target_model)
+                    .await
+                    .map_err(|e| anyhow!("Failed to load model '{}': {}", target_model, e))?;
+            }
+
+            Ok(e)
+        }
+        None => Err(anyhow!("Gipformer engine not initialized")),
     }
 }
 

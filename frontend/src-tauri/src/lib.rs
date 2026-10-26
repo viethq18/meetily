@@ -48,6 +48,7 @@ pub mod openai;
 pub mod anthropic;
 pub mod groq;
 pub mod openrouter;
+pub mod gipformer_engine;
 pub mod parakeet_engine;
 pub mod state;
 pub mod summary;
@@ -67,12 +68,33 @@ static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
 static ONNX_RUNTIME_INIT_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// The process-wide ONNX Runtime environment, required to create sessions
+/// with `ort` 2.0.0-rc.11+. On Windows it is initialized during app setup from
+/// the bundled `onnxruntime.dll`; elsewhere it falls back to the default
+/// (statically linked) runtime.
+static ORT_ENV: std::sync::OnceLock<ort::environment::Environment> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn ort_env() -> &'static ort::environment::Environment {
+    let env = ORT_ENV.get_or_init(|| {
+        ort::environment::init()
+            .with_telemetry(false)
+            .build()
+            .expect("failed to initialize ONNX Runtime environment")
+    });
+    // ONNX Runtime allows a single environment per process; make sure the
+    // silero VAD (which manages its own lazy fallback) reuses ours.
+    silero_rs::set_shared_environment(env.clone());
+    env
+}
+
 pub(crate) fn ensure_onnx_runtime_available() -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     if let Some(error) = ONNX_RUNTIME_INIT_ERROR.get() {
         anyhow::bail!("{error}");
     }
 
+    let _ = ort_env();
     Ok(())
 }
 
@@ -483,9 +505,17 @@ pub fn run() {
                 Ok(runtime_path) => {
                     match catch_onnx_runtime_init(|| {
                         ort::init_from(runtime_path.to_string_lossy().into_owned())
-                            .with_telemetry(false)
-                            .commit()
-                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                            .and_then(|builder| {
+                                builder
+                                    .with_telemetry(false)
+                                    .build()
+                                    .map(|env| {
+                                        ORT_ENV.set(env.clone());
+                                        silero_rs::set_shared_environment(env)
+                                    })
+                                    .map_err(|e| e.to_string())
+                            })
                     }) {
                         Ok(()) => log::info!(
                             "Initialized bundled ONNX Runtime from {}",
@@ -554,6 +584,16 @@ pub fn run() {
             tauri::async_runtime::spawn(async {
                 if let Err(e) = parakeet_engine::commands::parakeet_init().await {
                     log::error!("Failed to initialize Parakeet engine on startup: {}", e);
+                }
+            });
+
+            // Set Gipformer models directory
+            gipformer_engine::commands::set_models_directory(&_app.handle());
+
+            // Initialize Gipformer engine on startup
+            tauri::async_runtime::spawn(async {
+                if let Err(e) = gipformer_engine::commands::gipformer_init().await {
+                    log::error!("Failed to initialize Gipformer engine on startup: {}", e);
                 }
             });
 
@@ -668,6 +708,20 @@ pub fn run() {
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,
+            // Gipformer engine commands
+            gipformer_engine::commands::gipformer_init,
+            gipformer_engine::commands::gipformer_has_available_models,
+            gipformer_engine::commands::gipformer_get_available_models,
+            gipformer_engine::commands::gipformer_load_model,
+            gipformer_engine::commands::gipformer_unload_model,
+            gipformer_engine::commands::gipformer_get_current_model,
+            gipformer_engine::commands::gipformer_is_model_loaded,
+            gipformer_engine::commands::gipformer_get_models_directory,
+            gipformer_engine::commands::gipformer_download_model,
+            gipformer_engine::commands::gipformer_retry_download,
+            gipformer_engine::commands::gipformer_cancel_download,
+            gipformer_engine::commands::gipformer_delete_corrupted_model,
+            gipformer_engine::commands::gipformer_validate_model_ready_with_config,
             // Parallel processing commands
             whisper_engine::parallel_commands::initialize_parallel_processor,
             whisper_engine::parallel_commands::start_parallel_processing,
@@ -739,6 +793,10 @@ pub fn run() {
             api::api_save_custom_openai_config,
             api::api_get_custom_openai_config,
             api::api_test_custom_openai_connection,
+            // OpenAI-compatible transcription commands
+            api::api_save_transcript_openai_config,
+            api::api_get_transcript_openai_config,
+            api::api_test_transcript_openai_connection,
             // Summary commands
             summary::commands::api_process_transcript,
             summary::commands::api_get_summary,

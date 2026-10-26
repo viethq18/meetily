@@ -345,4 +345,58 @@ impl SettingsRepository {
 
         Ok(())
     }
+
+    // ===== OPENAI-COMPATIBLE TRANSCRIPTION CONFIG =====
+
+    /// Get the OpenAI-compatible transcription endpoint config from
+    /// `transcript_settings.transcriptOpenAIConfig` (JSON column).
+    pub async fn get_transcript_openai_config(
+        pool: &SqlitePool,
+    ) -> std::result::Result<
+        Option<crate::audio::transcription::openai_compatible::TranscriptOpenAIConfig>,
+        sqlx::Error,
+    > {
+        let json: Option<String> =
+            sqlx::query_scalar("SELECT transcriptOpenAIConfig FROM transcript_settings WHERE id = '1' LIMIT 1")
+                .fetch_optional(pool)
+                .await?;
+
+        match json {
+            Some(json) => {
+                let config = serde_json::from_str(&json).map_err(|e| {
+                    sqlx::Error::Protocol(
+                        format!("Invalid JSON in transcriptOpenAIConfig: {}", e).into(),
+                    )
+                })?;
+                Ok(Some(config))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Save the OpenAI-compatible transcription endpoint config, preserving
+    /// the current provider/model selection.
+    pub async fn save_transcript_openai_config(
+        pool: &SqlitePool,
+        config: &crate::audio::transcription::openai_compatible::TranscriptOpenAIConfig,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let config_json = serde_json::to_string(config).map_err(|e| {
+            sqlx::Error::Protocol(format!("Failed to serialize config to JSON: {}", e).into())
+        })?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO transcript_settings (id, provider, model, transcriptOpenAIConfig)
+            VALUES ('1', 'openai-compatible', $1, $2)
+            ON CONFLICT(id) DO UPDATE SET
+                transcriptOpenAIConfig = excluded.transcriptOpenAIConfig
+            "#,
+        )
+        .bind(&config.model)
+        .bind(config_json)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
 }

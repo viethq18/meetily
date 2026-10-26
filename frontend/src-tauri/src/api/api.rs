@@ -14,6 +14,7 @@ use crate::{
     },
     state::AppState,
     summary::CustomOpenAIConfig,
+    audio::transcription::TranscriptionProvider,
 };
 
 // Hardcoded server URL
@@ -1378,6 +1379,136 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
             } else {
                 Err(format!("Connection failed: {}", e))
             }
+        }
+    }
+}
+
+// ===== OPENAI-COMPATIBLE TRANSCRIPTION API COMMANDS =====
+
+/// Saves the OpenAI-compatible transcription endpoint configuration.
+#[tauri::command]
+pub async fn api_save_transcript_openai_config<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    endpoint: String,
+    api_key: Option<String>,
+    model: String,
+) -> Result<serde_json::Value, String> {
+    log_info!(
+        "api_save_transcript_openai_config called: endpoint='{}', model='{}'",
+        &endpoint,
+        &model
+    );
+
+    if endpoint.trim().is_empty() {
+        return Err("Endpoint URL is required".to_string());
+    }
+    if model.trim().is_empty() {
+        return Err("Model name is required".to_string());
+    }
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        return Err("Endpoint must start with http:// or https://".to_string());
+    }
+
+    let config = crate::audio::transcription::openai_compatible::TranscriptOpenAIConfig {
+        endpoint: endpoint.trim().to_string(),
+        api_key: api_key.filter(|k| !k.trim().is_empty()),
+        model: model.trim().to_string(),
+    };
+
+    let pool = state.db_manager.pool();
+
+    match SettingsRepository::save_transcript_openai_config(pool, &config).await {
+        Ok(()) => {
+            log_info!(
+                "✅ Successfully saved OpenAI-compatible transcription config for endpoint: {}",
+                config.endpoint
+            );
+            Ok(serde_json::json!({
+                "status": "success",
+                "message": "OpenAI-compatible transcription configuration saved successfully"
+            }))
+        }
+        Err(e) => {
+            log_error!("❌ Failed to save OpenAI-compatible transcription config: {}", e);
+            Err(format!(
+                "Failed to save OpenAI-compatible transcription configuration: {}",
+                e
+            ))
+        }
+    }
+}
+
+/// Gets the OpenAI-compatible transcription endpoint configuration.
+#[tauri::command]
+pub async fn api_get_transcript_openai_config<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<crate::audio::transcription::openai_compatible::TranscriptOpenAIConfig>, String>
+{
+    log_info!("api_get_transcript_openai_config called");
+
+    let pool = state.db_manager.pool();
+
+    match SettingsRepository::get_transcript_openai_config(pool).await {
+        Ok(config) => Ok(config),
+        Err(e) => {
+            log_error!("❌ Failed to get OpenAI-compatible transcription config: {}", e);
+            Err(format!(
+                "Failed to get OpenAI-compatible transcription configuration: {}",
+                e
+            ))
+        }
+    }
+}
+
+/// Tests the connection to an OpenAI-compatible transcription endpoint by
+/// uploading a short silent WAV and checking for a well-formed response.
+#[tauri::command]
+pub async fn api_test_transcript_openai_connection<R: Runtime>(
+    _app: AppHandle<R>,
+    _state: tauri::State<'_, AppState>,
+    endpoint: String,
+    api_key: Option<String>,
+    model: String,
+) -> Result<serde_json::Value, String> {
+    log_info!(
+        "api_test_transcript_openai_connection called: endpoint='{}', model='{}'",
+        &endpoint,
+        &model
+    );
+
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        return Err("Endpoint must start with http:// or https://".to_string());
+    }
+
+    let provider = crate::audio::transcription::OpenAICompatibleProvider::new();
+    provider.set_config(Some(
+        crate::audio::transcription::openai_compatible::TranscriptOpenAIConfig {
+            endpoint,
+            api_key,
+            model,
+        },
+    ));
+
+    // 1 second of silence: enough for endpoints to accept, unambiguous result.
+    let silence = vec![0.0_f32; 16000];
+    match provider.transcribe(silence, None).await {
+        Ok(result) => {
+            log_info!("✅ OpenAI-compatible transcription connection test successful");
+            Ok(serde_json::json!({
+                "status": "success",
+                "message": "Connection successful and response validated",
+                "transcribed_text_length": result.text.len()
+            }))
+        }
+        Err(crate::audio::transcription::TranscriptionError::EngineFailed(msg)) => {
+            log_warn!("⚠️ OpenAI-compatible transcription connection test failed: {}", msg);
+            Err(format!("Connection failed: {}", msg))
+        }
+        Err(e) => {
+            log_warn!("⚠️ OpenAI-compatible transcription connection test failed: {}", e);
+            Err(format!("Connection failed: {}", e))
         }
     }
 }
