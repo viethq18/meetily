@@ -114,7 +114,10 @@ pub async fn gipformer_download_model(
                 "gipformer-model-download-progress",
                 &serde_json::json!({
                     "modelName": progress_model_name,
-                    "progress": progress,
+                    "progress": progress.percent,
+                    "downloadedMb": progress.downloaded_mb,
+                    "totalMb": progress.total_mb,
+                    "speedMbps": progress.speed_mbps,
                 }),
             );
         }));
