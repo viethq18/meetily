@@ -26,6 +26,31 @@ use super::vad::{ContinuousVadProcessor};
 /// during continuous speech is tracked separately in #756.
 const VAD_REDEMPTION_TIME_MS: u32 = 500;
 
+/// Speaker attribution mode for the live transcription path.
+///
+/// - `Off`: mic and system audio are mixed; transcripts have no speaker tag.
+/// - `LocalRemote`: mic and system audio are transcribed separately; chunks
+///   keep their real device type so each transcript segment is tagged as the
+///   local ("microphone") or remote ("system") speaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeakerAttribution {
+    Off,
+    LocalRemote,
+}
+
+impl SpeakerAttribution {
+    /// Parse the persisted setting value ("off" | "local_remote" |
+    /// "multi_speaker"). `multi_speaker` is handled post-recording, so on the
+    /// live path it behaves like `Off`.
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "local_remote" => SpeakerAttribution::LocalRemote,
+            _ => SpeakerAttribution::Off,
+        }
+    }
+}
+
+
 /// Ring buffer for synchronized audio mixing
 /// Accumulates samples from mic and system streams until we have aligned windows
 struct AudioMixerRingBuffer {
@@ -626,6 +651,7 @@ impl AudioCapture {
             timestamp,
             chunk_id,
             device_type: self.device_type.clone(),
+            speaker: None,
         };
 
         // NOTE: Raw audio is NOT sent to recording saver to prevent echo
@@ -707,6 +733,10 @@ pub struct AudioPipeline {
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    // Speaker attribution: per-stream VAD when LocalRemote
+    speaker_attribution: SpeakerAttribution,
+    mic_vad_processor: ContinuousVadProcessor,
+    system_vad_processor: ContinuousVadProcessor,
 }
 
 impl AudioPipeline {
@@ -716,6 +746,7 @@ impl AudioPipeline {
         state: Arc<RecordingState>,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
+        speaker_attribution: SpeakerAttribution,
         mic_device_name: String,
         mic_device_kind: super::device_detection::InputDeviceKind,
         system_device_name: String,
@@ -785,6 +816,9 @@ impl AudioPipeline {
             ring_buffer,
             mixer,
             recording_sender_for_mixed: None,  // Will be set by manager
+            speaker_attribution,
+            mic_vad_processor: ContinuousVadProcessor::new(sample_rate, VAD_REDEMPTION_TIME_MS)?,
+            system_vad_processor: ContinuousVadProcessor::new(sample_rate, VAD_REDEMPTION_TIME_MS)?,
         })
     }
 
@@ -842,7 +876,45 @@ impl AudioPipeline {
                     // STEP 1: Add raw audio to ring buffer for mixing
                     // Microphone audio is already normalized at capture level (AudioCapture)
                     // System audio remains raw
-                    self.ring_buffer.add_samples(chunk.device_type.clone(), chunk.data);
+                    self.ring_buffer.add_samples(chunk.device_type.clone(), chunk.data.clone());
+
+                    // Speaker attribution (local/remote): run VAD on each stream
+                    // separately and send speech segments tagged with the real
+                    // device type, so the transcription worker can label each
+                    // transcript segment as the local or remote speaker.
+                    if self.speaker_attribution == SpeakerAttribution::LocalRemote {
+                        let vad = match chunk.device_type {
+                            DeviceType::System => &mut self.system_vad_processor,
+                            DeviceType::Microphone => &mut self.mic_vad_processor,
+                        };
+                        match vad.process_audio(&chunk.data) {
+                            Ok(speech_segments) => {
+                                for segment in speech_segments {
+                                    if segment.samples.len() >= 800 {
+                                        let transcription_chunk = AudioChunk {
+                                            data: segment.samples,
+                                            sample_rate: 16000,
+                                            timestamp: segment.start_timestamp_ms / 1000.0,
+                                            chunk_id: self.chunk_id_counter,
+                                            device_type: chunk.device_type.clone(),
+                                            speaker: Some(match chunk.device_type {
+                                                DeviceType::Microphone => "local".to_string(),
+                                                DeviceType::System => "remote".to_string(),
+                                            }),
+                                        };
+                                        if let Err(e) = self.transcription_sender.send(transcription_chunk) {
+                                            warn!("Failed to send speaker VAD segment: {}", e);
+                                        } else {
+                                            self.chunk_id_counter += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("⚠️ Speaker-attribution VAD error: {}", e);
+                            }
+                        }
+                    }
 
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
@@ -857,36 +929,42 @@ impl AudioPipeline {
                             let mixed_with_gain = mixed_clean;
 
                             // STEP 3: Send mixed audio for transcription (VAD + Whisper)
-                            match self.vad_processor.process_audio(&mixed_with_gain) {
-                                Ok(speech_segments) => {
-                                    for segment in speech_segments {
-                                        let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
+                            // Only when speaker attribution is off: in LocalRemote
+                            // mode each stream was already VAD'd and dispatched
+                            // separately above, so mixed VAD would duplicate.
+                            if self.speaker_attribution != SpeakerAttribution::LocalRemote {
+                                match self.vad_processor.process_audio(&mixed_with_gain) {
+                                    Ok(speech_segments) => {
+                                        for segment in speech_segments {
+                                            let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
 
-                                        if segment.samples.len() >= 800 {  // Minimum 50ms at 16kHz - matches Parakeet capability
-                                            info!("📤 Sending VAD segment: {:.1}ms, {} samples",
-                                                  duration_ms, segment.samples.len());
+                                            if segment.samples.len() >= 800 {  // Minimum 50ms at 16kHz - matches Parakeet capability
+                                                info!("📤 Sending VAD segment: {:.1}ms, {} samples",
+                                                      duration_ms, segment.samples.len());
 
-                                            let transcription_chunk = AudioChunk {
-                                                data: segment.samples,
-                                                sample_rate: 16000,
-                                                timestamp: segment.start_timestamp_ms / 1000.0,
-                                                chunk_id: self.chunk_id_counter,
-                                                device_type: DeviceType::Microphone,  // Mixed audio
-                                            };
+                                                let transcription_chunk = AudioChunk {
+                                                    data: segment.samples,
+                                                    sample_rate: 16000,
+                                                    timestamp: segment.start_timestamp_ms / 1000.0,
+                                                    chunk_id: self.chunk_id_counter,
+                                                    device_type: DeviceType::Microphone,  // Mixed audio
+                                                    speaker: None,
+                                                };
 
-                                            if let Err(e) = self.transcription_sender.send(transcription_chunk) {
-                                                warn!("Failed to send VAD segment: {}", e);
+                                                if let Err(e) = self.transcription_sender.send(transcription_chunk) {
+                                                    warn!("Failed to send VAD segment: {}", e);
+                                                } else {
+                                                    self.chunk_id_counter += 1;
+                                                }
                                             } else {
-                                                self.chunk_id_counter += 1;
+                                                debug!("⏭️ Dropping short VAD segment: {:.1}ms ({} samples < 800)",
+                                                       duration_ms, segment.samples.len());
                                             }
-                                        } else {
-                                            debug!("⏭️ Dropping short VAD segment: {:.1}ms ({} samples < 800)",
-                                                   duration_ms, segment.samples.len());
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    warn!("⚠️ VAD error: {}", e);
+                                    Err(e) => {
+                                        warn!("⚠️ VAD error: {}", e);
+                                    }
                                 }
                             }
 
@@ -898,6 +976,7 @@ impl AudioPipeline {
                                     timestamp: chunk.timestamp,
                                     chunk_id: self.chunk_id_counter,
                                     device_type: DeviceType::Microphone,  // Mixed audio
+                                    speaker: None,
                                 };
                                 let _ = sender.send(recording_chunk);
                             }
@@ -942,6 +1021,7 @@ impl AudioPipeline {
                             timestamp: segment.start_timestamp_ms / 1000.0,
                             chunk_id: self.chunk_id_counter,
                             device_type: DeviceType::Microphone,
+                            speaker: None,
                         };
 
                         if let Err(e) = self.transcription_sender.send(transcription_chunk) {
@@ -958,6 +1038,42 @@ impl AudioPipeline {
             Err(e) => {
                 warn!("Failed to flush VAD processor: {}", e);
             }
+        }
+
+        // In local/remote mode also flush the per-stream VAD processors so
+        // trailing speech from each speaker is not lost.
+        if self.speaker_attribution == SpeakerAttribution::LocalRemote {
+            let mut flush_stream = |vad: &mut ContinuousVadProcessor, device_type: DeviceType| {
+                match vad.flush() {
+                    Ok(final_segments) => {
+                        for segment in final_segments {
+                            if segment.samples.len() >= 800 {
+                                let transcription_chunk = AudioChunk {
+                                    data: segment.samples,
+                                    sample_rate: 16000,
+                                    timestamp: segment.start_timestamp_ms / 1000.0,
+                                    chunk_id: self.chunk_id_counter,
+                                    device_type: device_type.clone(),
+                                    speaker: Some(match device_type {
+                                        DeviceType::Microphone => "local".to_string(),
+                                        DeviceType::System => "remote".to_string(),
+                                    }),
+                                };
+                                if let Err(e) = self.transcription_sender.send(transcription_chunk) {
+                                    warn!("Failed to send final speaker VAD segment: {}", e);
+                                } else {
+                                    self.chunk_id_counter += 1;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to flush speaker VAD processor: {}", e);
+                    }
+                }
+            };
+            flush_stream(&mut self.mic_vad_processor, DeviceType::Microphone);
+            flush_stream(&mut self.system_vad_processor, DeviceType::System);
         }
 
         Ok(())
@@ -986,6 +1102,7 @@ impl AudioPipelineManager {
         transcription_sender: mpsc::UnboundedSender<AudioChunk>,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
+        speaker_attribution: SpeakerAttribution,
         recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
         mic_device_name: String,
         mic_device_kind: super::device_detection::InputDeviceKind,
@@ -1008,6 +1125,7 @@ impl AudioPipelineManager {
             state.clone(),
             target_chunk_duration_ms,
             sample_rate,
+            speaker_attribution,
             mic_device_name,
             mic_device_kind,
             system_device_name,
@@ -1063,6 +1181,7 @@ impl AudioPipelineManager {
                 timestamp: 0.0,
                 chunk_id: u64::MAX, // Special ID to indicate flush
                 device_type: super::recording_state::DeviceType::Microphone,
+                speaker: None,
             };
 
             if let Err(e) = sender.send(flush_chunk) {
@@ -1083,6 +1202,7 @@ impl AudioPipelineManager {
                         timestamp: 0.0,
                         chunk_id: u64::MAX - (i as u64),
                         device_type: super::recording_state::DeviceType::Microphone,
+                        speaker: None,
                     };
                     let _ = sender.send(additional_flush);
                 }

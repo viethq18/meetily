@@ -42,6 +42,9 @@ pub struct TranscriptUpdate {
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
     pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
+    // Speaker attribution: "local" (microphone) or "remote" (system audio).
+    // None when speaker attribution is off or mixed audio was transcribed.
+    pub speaker: Option<String>,
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
@@ -148,8 +151,10 @@ pub fn start_transcription_task<R: Runtime>(
                                 continue;
                             }
 
+
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
+                            let chunk_speaker = chunk.speaker.clone();
 
                             // Transcribe with provider-agnostic approach
                             match transcribe_chunk_with_provider(
@@ -216,6 +221,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
+                                            speaker: chunk_speaker.clone(),
                                         };
 
                                         if let Err(e) = app_clone.emit("transcript-update", &update)

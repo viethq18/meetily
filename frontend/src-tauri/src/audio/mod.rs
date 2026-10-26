@@ -81,8 +81,8 @@ pub use system_audio_commands::{
 
 // Export new simplified components
 pub use recording_state::{RecordingState, AudioChunk, ProcessedAudioChunk, AudioError, DeviceType as RecordingDeviceType};
-pub use pipeline::{AudioPipelineManager};
 pub use stream::{AudioStreamManager};
+pub use pipeline::SpeakerAttribution;
 pub use recording_manager::{RecordingManager};
 pub use recording_commands::{
     start_recording, start_recording_with_devices, stop_recording,

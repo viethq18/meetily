@@ -28,6 +28,23 @@ use super::transcription::{
     reset_speech_detected_flag,
 };
 
+/// Read the persisted speaker attribution mode from the database.
+/// Falls back to `Off` when the setting is missing or unreadable.
+async fn load_speaker_attribution<R: Runtime>(app: &AppHandle<R>) -> super::pipeline::SpeakerAttribution {
+    let mode = {
+        let state = app.state::<crate::state::AppState>();
+        let pool = state.db_manager.pool().clone();
+        crate::database::repositories::setting::SettingsRepository::get_speaker_attribution(&pool).await
+    };
+    match mode {
+        Ok(value) => super::pipeline::SpeakerAttribution::from_setting(&value),
+        Err(e) => {
+            warn!("Failed to read speaker attribution mode, defaulting to off: {}", e);
+            super::pipeline::SpeakerAttribution::Off
+        }
+    }
+}
+
 // Re-export TranscriptUpdate for backward compatibility
 pub use super::transcription::TranscriptUpdate;
 
@@ -401,8 +418,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     });
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
+    let speaker_attribution = load_speaker_attribution(&app).await;
     let transcription_receiver = manager
-        .start_recording(microphone_device, system_device, auto_save)
+        .start_recording(microphone_device, system_device, auto_save, speaker_attribution)
         .await
         .map_err(|error| map_recording_start_error(&app, error))?;
 
@@ -452,6 +470,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                     display_time: update.timestamp.clone(), // Use wall-clock timestamp for display
                     confidence: update.confidence,
                     sequence_id: update.sequence_id,
+                    speaker: update.speaker.clone(),
                 };
 
                 // Save to recording manager
@@ -588,8 +607,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     });
 
     // Start recording with specified devices and auto_save setting
+    let speaker_attribution = load_speaker_attribution(&app).await;
     let transcription_receiver = manager
-        .start_recording(mic_device, system_device, auto_save)
+        .start_recording(mic_device, system_device, auto_save, speaker_attribution)
         .await
         .map_err(|error| map_recording_start_error(&app, error))?;
 
@@ -639,6 +659,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                     display_time: update.timestamp.clone(), // Use wall-clock timestamp for display
                     confidence: update.confidence,
                     sequence_id: update.sequence_id,
+                    speaker: update.speaker.clone(),
                 };
 
                 // Save to recording manager

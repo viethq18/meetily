@@ -22,6 +22,9 @@ pub struct AudioChunk {
     pub timestamp: f64,
     pub chunk_id: u64,
     pub device_type: DeviceType,
+    /// Speaker attribution tag carried from the pipeline to the transcription
+    /// worker: Some("local"|"remote") in local/remote mode, None otherwise.
+    pub speaker: Option<String>,
 }
 
 /// Processed audio chunk (post-VAD) for recording

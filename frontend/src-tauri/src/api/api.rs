@@ -189,6 +189,9 @@ pub struct TranscriptSegment {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    /// Speaker attribution ("local" | "remote"); absent when attribution is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1509,6 +1512,45 @@ pub async fn api_test_transcript_openai_connection<R: Runtime>(
         Err(e) => {
             log_warn!("⚠️ OpenAI-compatible transcription connection test failed: {}", e);
             Err(format!("Connection failed: {}", e))
+        }
+    }
+}
+
+/// Gets the speaker attribution mode ("off" | "local_remote" | "multi_speaker").
+#[tauri::command]
+pub async fn api_get_speaker_attribution<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    log_info!("api_get_speaker_attribution called");
+
+    let pool = state.db_manager.pool();
+
+    match SettingsRepository::get_speaker_attribution(pool).await {
+        Ok(mode) => Ok(mode),
+        Err(e) => {
+            log_error!("❌ Failed to get speaker attribution mode: {}", e);
+            Err(format!("Failed to get speaker attribution mode: {}", e))
+        }
+    }
+}
+
+/// Saves the speaker attribution mode ("off" | "local_remote" | "multi_speaker").
+#[tauri::command]
+pub async fn api_save_speaker_attribution<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    mode: String,
+) -> Result<(), String> {
+    log_info!("api_save_speaker_attribution called: {}", mode);
+
+    let pool = state.db_manager.pool();
+
+    match SettingsRepository::save_speaker_attribution(pool, &mode).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            log_error!("❌ Failed to save speaker attribution mode: {}", e);
+            Err(format!("Failed to save speaker attribution mode: {}", e))
         }
     }
 }

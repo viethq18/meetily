@@ -230,8 +230,12 @@ impl RecordingManager {
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
+        speaker_attribution: super::pipeline::SpeakerAttribution,
     ) -> std::result::Result<mpsc::UnboundedReceiver<AudioChunk>, RecordingStartError> {
-        info!("Starting recording manager (auto_save: {})", auto_save);
+        info!(
+            "Starting recording manager (auto_save: {}, speaker_attribution: {:?})",
+            auto_save, speaker_attribution
+        );
 
         // Set up transcription channel
         let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
@@ -260,12 +264,12 @@ impl RecordingManager {
 
         // Start the audio processing pipeline with FFmpeg adaptive mixer
         // Pipeline will: 1) Mix mic+system audio with adaptive buffering, 2) Send mixed to recording_sender,
-        // 3) Apply VAD and send speech segments to transcription
         if let Err(error) = self.pipeline_manager.start(
             self.state.clone(),
             transcription_sender,
             0, // Ignored - using dynamic sizing internally
             48000, // 48kHz sample rate
+            speaker_attribution,
             Some(recording_sender), // CRITICAL: Pass recording sender to receive pre-mixed audio
             mic_name,
             mic_kind,

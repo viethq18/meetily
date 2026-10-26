@@ -31,6 +31,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
+  const [speakerAttribution, setSpeakerAttribution] = useState<'off' | 'local_remote' | 'multi_speaker'>('off');
+  const [loadingAttribution, setLoadingAttribution] = useState(true);
   const { isRecording } = useRecordingState();
   const { setSelectedDevices } = useConfig();
 
@@ -71,6 +73,43 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     };
     loadNotificationPref();
   }, []);
+
+  // Load speaker attribution mode from backend settings
+  useEffect(() => {
+    const loadAttribution = async () => {
+      try {
+        const mode = await invoke<string>('api_get_speaker_attribution');
+        if (mode === 'local_remote' || mode === 'multi_speaker' || mode === 'off') {
+          setSpeakerAttribution(mode);
+        }
+      } catch (error) {
+        console.error('Failed to load speaker attribution mode:', error);
+      } finally {
+        setLoadingAttribution(false);
+      }
+    };
+    loadAttribution();
+  }, []);
+
+  const handleSpeakerAttributionChange = async (mode: 'off' | 'local_remote' | 'multi_speaker') => {
+    const previous = speakerAttribution;
+    setSpeakerAttribution(mode);
+    try {
+      await invoke('api_save_speaker_attribution', { mode });
+      toast.success('Speaker attribution saved', {
+        description: mode === 'off'
+          ? 'Transcripts will not be tagged with speakers.'
+          : mode === 'local_remote'
+            ? 'Mic and system audio will be transcribed separately and tagged You / Remote.'
+            : 'A diarization model will assign speakers after recording stops.'
+      });
+      await Analytics.track('speaker_attribution_changed', { mode });
+    } catch (error) {
+      setSpeakerAttribution(previous);
+      console.error('Failed to save speaker attribution mode:', error);
+      toast.error('Failed to save speaker attribution');
+    }
+  };
 
   const handleAutoSaveToggle = async (enabled: boolean) => {
     const newPreferences = { ...preferences, auto_save: enabled };
@@ -225,7 +264,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       {/* Recording Notification Toggle */}
       <div className="flex items-center justify-between p-4 border rounded-lg">
         <div className="flex-1">
-          <div className="font-medium">Recording Start Notification</div>
           <div className="text-sm text-gray-600">
             Show reminder to inform participants when recording starts
           </div>
@@ -234,6 +272,42 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           checked={showRecordingNotification}
           onCheckedChange={handleNotificationToggle}
         />
+      </div>
+
+      {/* Speaker Attribution */}
+      <div className="p-4 border rounded-lg">
+        <div className="font-medium mb-1">Speaker Attribution</div>
+        <div className="text-sm text-gray-600 mb-4">
+          Tag transcript segments with who is speaking. Requires system audio capture for remote speakers.
+        </div>
+        {loadingAttribution ? (
+          <div className="h-9 bg-gray-100 rounded-md animate-pulse" />
+        ) : (
+          <div className="grid gap-2">
+            {([
+              { value: 'off', label: 'Off', description: 'Mixed audio, no speaker tags' },
+              { value: 'local_remote', label: 'You / Remote', description: 'Transcribe mic and system audio separately (best for online meetings)' },
+              { value: 'multi_speaker', label: 'Multi-speaker (beta)', description: 'Neural diarization after recording stops (handles many speakers)' },
+            ] as const).map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={speakerAttribution === option.value}
+                onClick={() => handleSpeakerAttributionChange(option.value)}
+                disabled={saving}
+                className={`text-left px-4 py-3 border rounded-md transition-colors ${
+                  speakerAttribution === option.value
+                    ? 'border-blue-500 bg-blue-50'
+                    : 'border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                <div className="text-sm font-medium">{option.label}</div>
+                <div className="text-xs text-gray-600">{option.description}</div>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Device Preferences */}

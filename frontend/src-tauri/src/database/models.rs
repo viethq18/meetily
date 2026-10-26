@@ -35,6 +35,7 @@ pub struct Transcript {
     pub audio_start_time: Option<f64>,
     pub audio_end_time: Option<f64>,
     pub duration: Option<f64>,
+    pub speaker: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -130,4 +131,7 @@ pub struct TranscriptSetting {
     #[sqlx(rename = "transcriptOpenAIConfig")]
     #[serde(rename = "transcriptOpenAIConfig")]
     pub transcript_openai_config: Option<String>,
+    #[sqlx(rename = "speakerAttribution")]
+    #[serde(rename = "speakerAttribution")]
+    pub speaker_attribution: Option<String>,
 }

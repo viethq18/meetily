@@ -231,6 +231,45 @@ impl SettingsRepository {
         Ok(api_key)
     }
 
+    /// Get the speaker attribution mode: "off" (default), "local_remote",
+    /// or "multi_speaker".
+    pub async fn get_speaker_attribution(
+        pool: &SqlitePool,
+    ) -> std::result::Result<String, sqlx::Error> {
+        let mode: Option<String> =
+            sqlx::query_scalar("SELECT speakerAttribution FROM transcript_settings WHERE id = '1' LIMIT 1")
+                .fetch_optional(pool)
+                .await?;
+        Ok(mode.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| "off".to_string()))
+    }
+
+    /// Save the speaker attribution mode ("off" | "local_remote" | "multi_speaker").
+    pub async fn save_speaker_attribution(
+        pool: &SqlitePool,
+        mode: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        if !matches!(mode, "off" | "local_remote" | "multi_speaker") {
+            return Err(sqlx::Error::Protocol(format!(
+                "Invalid speaker attribution mode: {}",
+                mode
+            )
+            .into()));
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO transcript_settings (id, provider, model, speakerAttribution)
+            VALUES ('1', 'parakeet', $2, $1)
+            ON CONFLICT(id) DO UPDATE SET
+                speakerAttribution = $1
+            "#,
+        )
+        .bind(mode)
+        .bind(crate::config::DEFAULT_PARAKEET_MODEL)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn delete_api_key(
         pool: &SqlitePool,
         provider: &str,

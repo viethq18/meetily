@@ -797,6 +797,9 @@ pub fn run() {
             api::api_save_transcript_openai_config,
             api::api_get_transcript_openai_config,
             api::api_test_transcript_openai_connection,
+            // Speaker attribution commands
+            api::api_get_speaker_attribution,
+            api::api_save_speaker_attribution,
             // Summary commands
             summary::commands::api_process_transcript,
             summary::commands::api_get_summary,
