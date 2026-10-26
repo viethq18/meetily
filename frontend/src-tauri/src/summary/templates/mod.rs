@@ -43,8 +43,9 @@ mod types;
 
 // Re-export public API
 pub use loader::{
-    get_template, list_template_ids, list_templates, set_bundled_templates_dir,
-    validate_and_parse_template,
+    custom_template_exists, delete_custom_template, get_template, is_builtin_template_id,
+    list_template_ids, list_templates, parse_template_markdown, save_custom_template,
+    set_bundled_templates_dir, template_to_markdown, validate_and_parse_template,
 };
 pub use types::{Template, TemplateSection};
 

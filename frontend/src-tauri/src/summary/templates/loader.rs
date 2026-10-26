@@ -217,6 +217,175 @@ pub fn list_templates() -> Vec<(String, String, String)> {
     templates
 }
 
+/// Save a custom template to the user's custom templates directory
+///
+/// Creates the directory if it does not exist. Custom templates override
+/// bundled/built-in templates with the same ID.
+///
+/// # Arguments
+/// * `template_id` - Template identifier (used as filename stem)
+/// * `template` - Validated template to persist
+///
+/// # Returns
+/// The path the template was written to
+pub fn save_custom_template(template_id: &str, template: &Template) -> Result<PathBuf, String> {
+    template.validate()?;
+
+    if template_id.is_empty()
+        || !template_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "Invalid template id '{}': use letters, digits, '_' or '-' only",
+            template_id
+        ));
+    }
+
+    let dir = get_custom_templates_dir()
+        .ok_or_else(|| "Could not resolve custom templates directory".to_string())?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create templates directory {:?}: {}", dir, e))?;
+
+    let path = dir.join(format!("{}.json", template_id));
+    let json = serde_json::to_string_pretty(template)
+        .map_err(|e| format!("Failed to serialize template: {}", e))?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("Failed to write template {:?}: {}", path, e))?;
+
+    info!("Saved custom template '{}' to {:?}", template_id, path);
+    Ok(path)
+}
+
+/// Delete a custom template from the user's custom templates directory
+///
+/// Returns Ok(false) when no custom template with this ID exists.
+pub fn delete_custom_template(template_id: &str) -> Result<bool, String> {
+    let dir = get_custom_templates_dir()
+        .ok_or_else(|| "Could not resolve custom templates directory".to_string())?;
+    let path = dir.join(format!("{}.json", template_id));
+
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    std::fs::remove_file(&path)
+        .map_err(|e| format!("Failed to delete template {:?}: {}", path, e))?;
+    info!("Deleted custom template '{}'", template_id);
+    Ok(true)
+}
+
+/// Whether a template ID is a read-only built-in (embedded) template
+pub fn is_builtin_template_id(template_id: &str) -> bool {
+    defaults::get_builtin_template(template_id).is_some()
+}
+
+/// Whether a custom (user-writable) template with this ID exists
+pub fn custom_template_exists(template_id: &str) -> bool {
+    get_custom_templates_dir()
+        .map(|dir| dir.join(format!("{}.json", template_id)).exists())
+        .unwrap_or(false)
+}
+
+/// Serialize a template to the Meetily Markdown format
+///
+/// Format: `# Title`, description paragraph, then for each section a
+/// `## Section Title` heading followed by the section instruction (and
+/// item_format table line when present). Round-trips with `parse_template_markdown`.
+pub fn template_to_markdown(template: &Template) -> String {
+    let mut md = format!("# {}\n\n{}\n", template.name, template.description);
+    for section in &template.sections {
+        md.push_str(&format!("\n## {}\n\n{}\n", section.title, section.instruction));
+        if let Some(item_format) = &section.item_format {
+            md.push_str(&format!("\n{}\n", item_format));
+        }
+    }
+    md
+}
+
+/// Parse the Meetily Markdown template format into a Template
+///
+/// The first `# Heading` is the template name; text between it and the first
+/// `## Heading` is the description; each `## Heading` starts a section whose
+/// body (until the next heading) is the instruction. A body line starting with
+/// `|` is captured as the section's `item_format` table.
+pub fn parse_template_markdown(markdown: &str) -> Result<Template, String> {
+    let mut name: Option<String> = None;
+    let mut description_lines: Vec<String> = Vec::new();
+    // (title, instruction_lines)
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+
+    for line in markdown.lines() {
+        let trimmed = line.trim_end();
+        if let Some(title) = trimmed.strip_prefix("# ") {
+            if name.is_none() && sections.is_empty() {
+                name = Some(title.trim().to_string());
+            } else {
+                return Err("Template must contain only one top-level '# Title' heading".to_string());
+            }
+        } else if let Some(title) = trimmed.strip_prefix("## ") {
+            sections.push((title.trim().to_string(), Vec::new()));
+        } else if !sections.is_empty() {
+            sections
+                .last_mut()
+                .expect("non-empty sections checked above")
+                .1
+                .push(trimmed.to_string());
+        } else if !trimmed.trim().is_empty() {
+            description_lines.push(trimmed.to_string());
+        }
+    }
+
+    let name = name.ok_or_else(|| "Template must start with a '# Title' heading".to_string())?;
+    if sections.is_empty() {
+        return Err("Template must include at least one '## Section' heading".to_string());
+    }
+
+    let mut parsed_sections = Vec::with_capacity(sections.len());
+    for (title, body_lines) in sections {
+        let instruction: String = body_lines
+            .iter()
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('|'))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        let table_lines: Vec<&String> = body_lines
+            .iter()
+            .filter(|l| l.trim_start().starts_with('|'))
+            .collect();
+        // Collapse table lines back into one item_format (they may span multiple lines)
+        let item_format = if table_lines.is_empty() {
+            None
+        } else {
+            Some(
+                table_lines
+                    .iter()
+                    .map(|l| l.trim().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        };
+
+        parsed_sections.push(super::types::TemplateSection {
+            title,
+            instruction,
+            format: if item_format.is_some() { "list".to_string() } else { "paragraph".to_string() },
+            item_format,
+            example_item_format: None,
+        });
+    }
+
+    let template = Template {
+        name,
+        description: description_lines.join(" ").trim().to_string(),
+        sections: parsed_sections,
+    };
+    template.validate()?;
+    Ok(template)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

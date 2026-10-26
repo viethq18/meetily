@@ -9,7 +9,9 @@ export function useTemplates() {
     name: string;
     description: string;
   }>>([]);
-  const [selectedTemplate, setSelectedTemplate] = useState<string>('standard_meeting');
+  const [selectedTemplate, setSelectedTemplate] = useState<string>(
+    () => (typeof window !== 'undefined' && window.localStorage.getItem('meetily_selected_template')) || 'standard_meeting'
+  );
 
   // Fetch available templates on mount
   useEffect(() => {
@@ -32,6 +34,7 @@ export function useTemplates() {
   // Handle template selection
   const handleTemplateSelection = useCallback((templateId: string, templateName: string) => {
     setSelectedTemplate(templateId);
+    window.localStorage.setItem('meetily_selected_template', templateId);
     toast.success('Template selected', {
       description: `Using "${templateName}" template for summary generation`,
     });
