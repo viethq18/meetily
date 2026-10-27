@@ -725,7 +725,7 @@ pub fn run() {
             gipformer_engine::commands::gipformer_retry_download,
             gipformer_engine::commands::gipformer_cancel_download,
             gipformer_engine::commands::gipformer_delete_corrupted_model,
-            gipformer_engine::commands::gipformer_validate_model_ready_with_config,
+            gipformer_engine::commands::gipformer_validate_model_ready,
             // Diarization engine commands (post-recording speaker attribution)
             diarization_engine::commands::diarization_models_available,
             diarization_engine::commands::diarization_download_models,

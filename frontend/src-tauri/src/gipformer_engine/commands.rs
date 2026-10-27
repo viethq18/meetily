@@ -203,24 +203,69 @@ pub async fn gipformer_get_models_directory() -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-#[command]
-pub async fn gipformer_validate_model_ready_with_config(
-    config: serde_json::Value,
+/// Internal validation that auto-loads the configured model (or the first
+/// available one) so a freshly restarted app can record immediately. This
+/// matches Whisper/Parakeet validation behavior.
+pub async fn gipformer_validate_model_ready_with_config<R: tauri::Runtime>(
+    app: &AppHandle<R>,
 ) -> Result<bool, String> {
-    let provider = config
-        .get("provider")
-        .and_then(|p| p.as_str())
-        .unwrap_or_default();
-
-    if provider != "gipformer" {
-        return Ok(false);
-    }
-
     let engine = engine()?;
-    if !engine.is_model_loaded().await {
+
+    // Fast path: a model is already loaded.
+    if engine.is_model_loaded().await {
+        if let Some(current) = engine.get_current_model().await {
+            log::info!("Gipformer model already loaded: {}", current);
+            return Ok(true);
+        }
+    }
+
+    // No model loaded — load the user's configured model, falling back to
+    // any available model.
+    let configured_model = match crate::api::api::api_get_transcript_config(
+        app.clone(),
+        app.state(),
+        None,
+    )
+    .await
+    {
+        Ok(Some(config)) if config.provider == "gipformer" && !config.model.is_empty() => {
+            Some(config.model)
+        }
+        _ => None,
+    };
+
+    let models = engine
+        .discover_models()
+        .await
+        .map_err(|e| format!("Failed to discover Gipformer models: {}", e))?;
+    let available: Vec<String> = models
+        .iter()
+        .filter(|m| matches!(m.status, crate::gipformer_engine::ModelStatus::Available))
+        .map(|m| m.name.clone())
+        .collect();
+
+    if available.is_empty() {
+        log::warn!("No Gipformer models available for auto-load");
         return Ok(false);
     }
-    Ok(engine.get_current_model().await.is_some())
+
+    let model_name = configured_model
+        .filter(|name| available.contains(name))
+        .unwrap_or_else(|| available[0].clone());
+
+    engine
+        .load_model(&model_name)
+        .await
+        .map_err(|e| format!("Failed to auto-load Gipformer model {}: {}", model_name, e))?;
+    log::info!("Auto-loaded Gipformer model: {}", model_name);
+
+    Ok(true)
+}
+
+/// Tauri command wrapper around the auto-loading validation.
+#[command]
+pub async fn gipformer_validate_model_ready(app: AppHandle) -> Result<bool, String> {
+    gipformer_validate_model_ready_with_config(&app).await
 }
 
 /// Direct transcription entrypoint used by the unified transcription dispatch.

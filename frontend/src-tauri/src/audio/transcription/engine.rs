@@ -151,7 +151,7 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
             }
 
             match crate::gipformer_engine::commands::gipformer_validate_model_ready_with_config(
-                serde_json::json!({ "provider": "gipformer" }),
+                app,
             )
             .await
             {
