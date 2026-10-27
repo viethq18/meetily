@@ -88,8 +88,11 @@ impl ModelSpec {
 }
 
 // Exact sizes from https://huggingface.co/g-group-ai-lab/gipformer1.5-68M-rnnt
-// (int8 quantized artifacts, ~73MB total).
+// (fp32 full-precision artifacts, ~270MB total; int8 kept as fallback, ~73MB).
 const GIPFORMER_15_ARTIFACTS: &[ArtifactSpec] = &[
+    ArtifactSpec { filename: "encoder.onnx", exact_bytes: 261_057_847 },
+    ArtifactSpec { filename: "decoder.onnx", exact_bytes: 5_165_084 },
+    ArtifactSpec { filename: "joiner.onnx", exact_bytes: 4_104_465 },
     ArtifactSpec { filename: "encoder.int8.onnx", exact_bytes: 70_876_359 },
     ArtifactSpec { filename: "decoder.int8.onnx", exact_bytes: 1_308_690 },
     ArtifactSpec { filename: "joiner.int8.onnx", exact_bytes: 1_033_417 },
@@ -98,8 +101,8 @@ const GIPFORMER_15_ARTIFACTS: &[ArtifactSpec] = &[
 
 const GIPFORMER_MODEL_SPECS: &[ModelSpec] = &[ModelSpec {
     name: "gipformer1.5-68M-rnnt",
-    size_mb: 73,
-    description: "Vietnamese speech recognition (Zipformer transducer, int8). Best Vietnamese WER in a 68M model.",
+    size_mb: 270,
+    description: "Vietnamese speech recognition (Zipformer transducer, fp32). Best Vietnamese WER in a 68M model.",
     source_base_url: "https://huggingface.co/g-group-ai-lab/gipformer1.5-68M-rnnt/resolve/main",
     artifacts: GIPFORMER_15_ARTIFACTS,
 }];

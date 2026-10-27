@@ -69,10 +69,10 @@ impl Drop for GipformerModel {
 }
 
 impl GipformerModel {
-    pub fn new<P: AsRef<Path>>(model_dir: P, quantized: bool) -> Result<Self, GipformerModelError> {
-        let encoder = Self::init_session(&model_dir, "encoder", quantized)?;
-        let decoder = Self::init_session(&model_dir, "decoder", quantized)?;
-        let joiner = Self::init_session(&model_dir, "joiner", quantized)?;
+    pub fn new<P: AsRef<Path>>(model_dir: P, allow_int8_fallback: bool) -> Result<Self, GipformerModelError> {
+        let encoder = Self::init_session(&model_dir, "encoder", allow_int8_fallback)?;
+        let decoder = Self::init_session(&model_dir, "decoder", allow_int8_fallback)?;
+        let joiner = Self::init_session(&model_dir, "joiner", allow_int8_fallback)?;
         let (vocab, blank_idx) = Self::load_vocab(&model_dir)?;
 
         let vocab_size = vocab.len();
@@ -95,18 +95,18 @@ impl GipformerModel {
     fn init_session<P: AsRef<Path>>(
         model_dir: P,
         base_name: &str,
-        try_quantized: bool,
+        allow_int8_fallback: bool,
     ) -> Result<Session, GipformerModelError> {
         crate::ensure_onnx_runtime_available()
             .map_err(|error| GipformerModelError::RuntimeUnavailable(error.to_string()))?;
 
         let providers = vec![ort::ep::CPU::default().build()];
 
-        // Prefer int8 files, fall back to full-precision when absent.
-        let candidates: Vec<String> = if try_quantized {
+        // Prefer full-precision fp32, fall back to int8 when absent.
+        let candidates: Vec<String> = if allow_int8_fallback {
             vec![
-                format!("{}.int8.onnx", base_name),
                 format!("{}.onnx", base_name),
+                format!("{}.int8.onnx", base_name),
             ]
         } else {
             vec![format!("{}.onnx", base_name)]
