@@ -2,12 +2,17 @@ import React, { useState, useEffect } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
 
+interface DiarizationDownloadProgress {
+  artifact: string;
+  percent: number;
+}
 export interface RecordingPreferences {
   save_folder: string;
   auto_save: boolean;
@@ -308,6 +313,10 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             ))}
           </div>
         )}
+
+        {speakerAttribution === 'multi_speaker' && (
+          <DiarizationModelStatus />
+        )}
       </div>
 
       {/* Device Preferences */}
@@ -340,6 +349,95 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Status row for the diarization model set: availability check, one-click
+// download with progress, shown only when multi-speaker mode is selected.
+function DiarizationModelStatus() {
+  const [available, setAvailable] = useState<boolean | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [progressLabel, setProgressLabel] = useState('');
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+
+    const check = async () => {
+      try {
+        const ok = await invoke<boolean>('diarization_models_available');
+        if (!cancelled) setAvailable(ok);
+      } catch (error) {
+        console.warn('Failed to check diarization model availability:', error);
+        if (!cancelled) setAvailable(false);
+      }
+    };
+    void check();
+
+    const listenToProgress = async () => {
+      try {
+        unlisten = await listen<DiarizationDownloadProgress>(
+          'diarization-model-download-progress',
+          (event) => {
+            const { artifact, percent } = event.payload;
+            setProgressLabel(
+              percent > 0 ? `Downloading ${artifact}… ${percent}%` : `Downloading ${artifact}…`,
+            );
+          },
+        );
+      } catch (error) {
+        console.warn('Failed to listen for diarization download progress:', error);
+      }
+    };
+    void listenToProgress();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    setProgressLabel('Preparing download…');
+    try {
+      await invoke('diarization_download_models');
+      setAvailable(true);
+      setProgressLabel('');
+      toast.success('Diarization models downloaded');
+    } catch (error) {
+      console.error('Diarization model download failed:', error);
+      toast.error('Model download failed', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      setProgressLabel('');
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  if (available === null) {
+    return <div className="mt-4 text-xs text-gray-500">Checking diarization models…</div>;
+  }
+  if (available) {
+    return (
+      <div className="mt-4 text-xs text-green-700">
+        Diarization models ready — speakers will be labeled after each recording stops.
+      </div>
+    );
+  }
+  return (
+    <div className="mt-4 flex items-center gap-3">
+      <button
+        type="button"
+        onClick={handleDownload}
+        disabled={downloading}
+        className="px-3 py-1.5 text-xs border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+      >
+        {downloading ? 'Downloading…' : 'Download diarization models (~40 MB)'}
+      </button>
+      {progressLabel && <span className="text-xs text-gray-500">{progressLabel}</span>}
     </div>
   );
 }

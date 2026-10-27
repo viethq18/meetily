@@ -3600,6 +3600,7 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "bytes",
+ "bzip2",
  "chrono",
  "cidre",
  "clap 4.6.7",

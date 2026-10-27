@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { useTranscripts } from '@/contexts/TranscriptContext';
@@ -292,6 +293,28 @@ export function useRecordingStop(
           console.log('✅ Successfully saved COMPLETE meeting with ID:', meetingId);
           console.log('   Transcripts:', freshTranscripts.length);
           console.log('   folder_path:', folderPath);
+
+          // Post-recording speaker diarization (multi_speaker mode): the
+          // backend reads the meeting audio, clusters speakers, and updates
+          // transcripts.speaker; the UI refreshes on `diarization-complete`.
+          void (async () => {
+            try {
+              const attribution = await invoke<string>('api_get_speaker_attribution');
+              if (attribution !== 'multi_speaker' || !folderPath) return;
+              const available = await invoke<boolean>('diarization_models_available');
+              if (!available) {
+                console.info('Diarization models not downloaded; skipping multi-speaker attribution');
+                return;
+              }
+              const result = await invoke<{ num_speakers: number; updated_transcripts: number }>(
+                'diarization_run_for_meeting',
+                { meetingId, meetingFolderPath: folderPath },
+              );
+              console.log(`✅ Diarization complete: ${result.num_speakers} speakers, ${result.updated_transcripts} transcripts updated`);
+            } catch (diarError) {
+              console.warn('Speaker diarization failed (meeting saved without multi-speaker labels):', diarError);
+            }
+          })();
 
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();

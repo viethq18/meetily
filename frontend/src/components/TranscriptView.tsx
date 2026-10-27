@@ -6,6 +6,7 @@ import { ConfidenceIndicator } from './ConfidenceIndicator';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { RecordingStatusBar } from './RecordingStatusBar';
 import { motion, AnimatePresence } from 'framer-motion';
+import { speakerBadgeClass, speakerBadgeLabel } from '@/lib/speaker-badge';
 
 interface TranscriptViewProps {
   transcripts: Transcript[];
@@ -306,13 +307,9 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
               </Tooltip>
               {transcript.speaker && (
                 <span
-                  className={`text-[10px] font-medium px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5 ${
-                    transcript.speaker === 'local'
-                      ? 'bg-blue-100 text-blue-700'
-                      : 'bg-gray-200 text-gray-700'
-                  }`}
+                  className={`text-[10px] font-medium px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5 ${speakerBadgeClass(transcript.speaker)}`}
                 >
-                  {transcript.speaker === 'local' ? 'You' : 'Remote'}
+                  {speakerBadgeLabel(transcript.speaker)}
                 </span>
               )}
               <div className="flex-1">

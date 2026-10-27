@@ -49,6 +49,7 @@ pub mod anthropic;
 pub mod groq;
 pub mod openrouter;
 pub mod gipformer_engine;
+pub mod diarization_engine;
 pub mod parakeet_engine;
 pub mod state;
 pub mod summary;
@@ -597,6 +598,9 @@ pub fn run() {
                 }
             });
 
+            // Set diarization models directory (engine loads lazily on first run)
+            diarization_engine::commands::set_models_directory(&_app.handle());
+
             // Initialize ModelManager for summary engine (async, non-blocking)
             let app_handle_for_model_manager = _app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -722,6 +726,10 @@ pub fn run() {
             gipformer_engine::commands::gipformer_cancel_download,
             gipformer_engine::commands::gipformer_delete_corrupted_model,
             gipformer_engine::commands::gipformer_validate_model_ready_with_config,
+            // Diarization engine commands (post-recording speaker attribution)
+            diarization_engine::commands::diarization_models_available,
+            diarization_engine::commands::diarization_download_models,
+            diarization_engine::commands::diarization_run_for_meeting,
             // Parallel processing commands
             whisper_engine::parallel_commands::initialize_parallel_processor,
             whisper_engine::parallel_commands::start_parallel_processing,

@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
+import { speakerBadgeClass, speakerBadgeLabel } from "@/lib/speaker-badge";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -100,11 +101,9 @@ const TranscriptSegment = memo(function TranscriptSegment({
                 </Tooltip>
                 {speaker && (
                     <span
-                        className={`text-[10px] font-medium px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5 ${
-                            speaker === 'local' ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-700'
-                        }`}
+                        className={`text-[10px] font-medium px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5 ${speakerBadgeClass(speaker)}`}
                     >
-                        {speaker === 'local' ? 'You' : 'Remote'}
+                        {speakerBadgeLabel(speaker)}
                     </span>
                 )}
                 <div className="flex-1">
